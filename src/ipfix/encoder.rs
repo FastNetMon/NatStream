@@ -86,10 +86,10 @@ impl IpfixEncoder {
         // packetDeltaCount (8 bytes)
         self.write_u64(event.orig_packets);
 
-        // postOctetDeltaCount (8 bytes)
+        // reverseOctetDeltaCount (8 bytes)
         self.write_u64(event.reply_bytes);
 
-        // postPacketDeltaCount (8 bytes)
+        // reversePacketDeltaCount (8 bytes)
         self.write_u64(event.reply_packets);
 
         self.record_count += 1;
@@ -145,10 +145,20 @@ impl IpfixEncoder {
         self.write_u16(NAT_TEMPLATE_ID);
         self.write_u16(TEMPLATE_FIELD_COUNT);
 
-        // Field specifiers
+        // Field specifiers. Enterprise-specific elements set the enterprise bit
+        // in the IE ID and append the Private Enterprise Number.
         for field in NAT_TEMPLATE_FIELDS {
-            self.write_u16(field.ie_id);
-            self.write_u16(field.length);
+            match field.enterprise {
+                Some(pen) => {
+                    self.write_u16(field.ie_id | ENTERPRISE_BIT);
+                    self.write_u16(field.length);
+                    self.write_u32(pen);
+                }
+                None => {
+                    self.write_u16(field.ie_id);
+                    self.write_u16(field.length);
+                }
+            }
         }
     }
 
@@ -156,6 +166,12 @@ impl IpfixEncoder {
     fn write_u16(&mut self, val: u16) {
         self.buf[self.offset..self.offset + 2].copy_from_slice(&val.to_be_bytes());
         self.offset += 2;
+    }
+
+    #[inline]
+    fn write_u32(&mut self, val: u32) {
+        self.buf[self.offset..self.offset + 4].copy_from_slice(&val.to_be_bytes());
+        self.offset += 4;
     }
 
     #[inline]
