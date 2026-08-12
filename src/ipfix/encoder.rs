@@ -80,6 +80,12 @@ impl IpfixEncoder {
         // postNAPTSourceTransportPort (2 bytes)
         self.write_u16(event.post_nat_src_port);
 
+        // postNATDestinationIPv4Address (4 bytes)
+        self.write_ipv4(event.post_nat_dst_ip);
+
+        // postNAPTDestinationTransportPort (2 bytes)
+        self.write_u16(event.post_nat_dst_port);
+
         // octetDeltaCount (8 bytes)
         self.write_u64(event.orig_bytes);
 

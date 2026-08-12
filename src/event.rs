@@ -37,6 +37,8 @@ pub struct ConntrackEvent {
     pub dst_port: u16,
     pub post_nat_src_ip: Ipv4Addr,
     pub post_nat_src_port: u16,
+    pub post_nat_dst_ip: Ipv4Addr,
+    pub post_nat_dst_port: u16,
     pub orig_bytes: u64,
     pub orig_packets: u64,
     pub reply_bytes: u64,
@@ -47,7 +49,7 @@ impl fmt::Display for ConntrackEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} proto={} {}:{} -> {}:{} nat={}:{} orig={}/{} reply={}/{}",
+            "{} proto={} {}:{} -> {}:{} nat={}:{} -> {}:{} orig={}/{} reply={}/{}",
             self.nat_event,
             self.protocol,
             self.src_ip,
@@ -56,6 +58,8 @@ impl fmt::Display for ConntrackEvent {
             self.dst_port,
             self.post_nat_src_ip,
             self.post_nat_src_port,
+            self.post_nat_dst_ip,
+            self.post_nat_dst_port,
             self.orig_bytes,
             self.orig_packets,
             self.reply_bytes,

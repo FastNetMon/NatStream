@@ -62,8 +62,10 @@ fn parse_nla_tree(nat_event: NatEventType, data: &[u8]) -> Option<ConntrackEvent
     let mut protocol: u8 = 0;
     let mut src_port: u16 = 0;
     let mut dst_port: u16 = 0;
-    let mut reply_dst_ip = Ipv4Addr::UNSPECIFIED;
-    let mut reply_dst_port: u16 = 0;
+    let mut post_nat_src_ip = Ipv4Addr::UNSPECIFIED;
+    let mut post_nat_src_port: u16 = 0;
+    let mut post_nat_dst_ip = Ipv4Addr::UNSPECIFIED;
+    let mut post_nat_dst_port: u16 = 0;
     let mut status: u32 = 0;
     let mut orig_bytes: u64 = 0;
     let mut orig_packets: u64 = 0;
@@ -87,16 +89,19 @@ fn parse_nla_tree(nat_event: NatEventType, data: &[u8]) -> Option<ConntrackEvent
                 parse_tuple(payload, &mut src_ip, &mut dst_ip, &mut protocol, &mut src_port, &mut dst_port);
             }
             CTA_TUPLE_REPLY => {
-                let mut _reply_src_ip = Ipv4Addr::UNSPECIFIED;
+                // The reply tuple is the original tuple with both translations
+                // applied and the direction swapped: its source is what the
+                // destination was rewritten to, and its destination is what the
+                // source was rewritten to. Either half is unchanged when that
+                // direction is not translated.
                 let mut _reply_proto: u8 = 0;
-                let mut _reply_src_port: u16 = 0;
                 parse_tuple(
                     payload,
-                    &mut _reply_src_ip,
-                    &mut reply_dst_ip,
+                    &mut post_nat_dst_ip,
+                    &mut post_nat_src_ip,
                     &mut _reply_proto,
-                    &mut _reply_src_port,
-                    &mut reply_dst_port,
+                    &mut post_nat_dst_port,
+                    &mut post_nat_src_port,
                 );
             }
             CTA_STATUS => {
@@ -130,8 +135,10 @@ fn parse_nla_tree(nat_event: NatEventType, data: &[u8]) -> Option<ConntrackEvent
         dst_ip,
         src_port,
         dst_port,
-        post_nat_src_ip: reply_dst_ip,
-        post_nat_src_port: reply_dst_port,
+        post_nat_src_ip,
+        post_nat_src_port,
+        post_nat_dst_ip,
+        post_nat_dst_port,
         orig_bytes,
         orig_packets,
         reply_bytes,

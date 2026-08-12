@@ -28,7 +28,9 @@ pub const IE_SOURCE_IPV4_ADDRESS: u16 = 8;        // 4 bytes
 pub const IE_DESTINATION_TRANSPORT_PORT: u16 = 11; // 2 bytes
 pub const IE_DESTINATION_IPV4_ADDRESS: u16 = 12;   // 4 bytes
 pub const IE_POST_NAT_SOURCE_IPV4_ADDRESS: u16 = 225; // 4 bytes
+pub const IE_POST_NAT_DESTINATION_IPV4_ADDRESS: u16 = 226; // 4 bytes
 pub const IE_POST_NAPT_SOURCE_TRANSPORT_PORT: u16 = 227; // 2 bytes
+pub const IE_POST_NAPT_DESTINATION_TRANSPORT_PORT: u16 = 228; // 2 bytes
 pub const IE_NAT_EVENT: u16 = 230;                // 1 byte
 
 // Reverse Information Elements (RFC 5103): the forward-direction IE carried
@@ -49,12 +51,13 @@ pub const FIELD_SPECIFIER_LEN: usize = 4;
 
 // Data record size (sum of all field sizes)
 // natEvent(1) + protocol(1) + srcIP(4) + dstIP(4) + srcPort(2) + dstPort(2)
-// + postNatSrcIP(4) + postNaptSrcPort(2) + octetDelta(8) + packetDelta(8)
-// + reverseOctetDelta(8) + reversePacketDelta(8) = 52 bytes
-pub const DATA_RECORD_SIZE: usize = 52;
+// + postNatSrcIP(4) + postNaptSrcPort(2) + postNatDstIP(4) + postNaptDstPort(2)
+// + octetDelta(8) + packetDelta(8) + reverseOctetDelta(8)
+// + reversePacketDelta(8) = 58 bytes
+pub const DATA_RECORD_SIZE: usize = 58;
 
 // Number of fields in our template
-pub const TEMPLATE_FIELD_COUNT: u16 = 12;
+pub const TEMPLATE_FIELD_COUNT: u16 = 14;
 
 // NAT event types (RFC 8158)
 pub const NAT44_SESSION_CREATE: u8 = 4;
