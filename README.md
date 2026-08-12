@@ -1,15 +1,16 @@
 # conntrack_exporter
 
-`conntrack_exporter` is a Linux daemon that exports conntrack NAT events as IPFIX (RFC 7011) records over UDP.
+`conntrack_exporter` is a Linux daemon that exports conntrack NAT events as IPFIX (RFC 7011) or NetFlow v9 (RFC 3954) records over UDP.
 
-It listens to netlink conntrack notifications, extracts NAT-relevant flow fields, and sends them as IPFIX data records to a configured collector.
+It listens to netlink conntrack notifications, extracts NAT-relevant flow fields, and sends them as flow records to a configured collector.
 
 ## What it does
 
 - Subscribes to `NFNLGRP_CONNTRACK_NEW` and `NFNLGRP_CONNTRACK_DESTROY` on `NETLINK_NETFILTER`.
 - Filters events to IPv4 NAT sessions (`IPS_SRC_NAT` or `IPS_DST_NAT`).
 - Emits records for CREATE/DELETE flow events.
-- Encodes records in a single fixed IPFIX template (ID `256`) and retransmits the template every 30 seconds, on its own message if no traffic is flowing.
+- Speaks IPFIX or NetFlow v9, with a selectable field set (see [Protocol and profiles](#protocol-and-profiles)).
+- Encodes records in a single template (ID `256` by default) and retransmits it every 30 seconds, on its own message if no traffic is flowing.
 - Flushes buffered IPFIX messages with:
   - immediate send when buffer is full
   - 100ms timeout flush for sparse traffic
@@ -57,6 +58,13 @@ sudo ./target/release/conntrack_exporter \
   --send-buf 8388608 \
   --domain-id 100
 
+# NetFlow v9 to a collector that only decodes the base field registry
+sudo ./target/release/conntrack_exporter \
+  --collector 203.0.113.10:2055 \
+  --protocol netflow9 \
+  --profile flow-only \
+  --counter-width 4
+
 # Run with self-supervision, a log file and verbose logs
 sudo ./target/release/conntrack_exporter --collector 203.0.113.10:4739 \
   --daemon --log-file /var/log/conntrack_exporter.log -v
@@ -67,41 +75,81 @@ stderr, rather than the built-in supervisor.
 
 ## Command-line options
 
-- `-c`, `--collector <ip:port>` (required): IPFIX collector endpoint.
+- `-c`, `--collector <ip:port>` (required): flow collector endpoint.
+- `--protocol <ipfix|netflow9>`: export protocol (default: `ipfix`).
+- `--profile <full|nat-source|flow-only>`: which field set to export (default: `full`).
+- `--counter-width <4|8>`: byte and packet counter width (default: `8`).
+- `--template-id <u16>`: template ID to advertise (default: `256`, minimum `256`).
+- `--template-interval <secs>`: seconds between template retransmissions (default: `30`).
+- `--domain-id <u32>`: observation domain ID / NetFlow v9 source ID (default: `0`).
 - `--recv-buf <bytes>`: netlink receive buffer size (default: `4194304`).
 - `--send-buf <bytes>`: UDP send buffer size (default: `4194304`).
-- `--domain-id <u32>`: IPFIX observation domain ID (default: `0`).
 - `-v`, `--verbose`: enable debug logging.
 - `--daemon`: run as a background supervisor/worker pair with restart on worker crash.
 - `--log-file <path>`: in `--daemon` mode, append log output here instead of discarding it.
 - `--no-sysctl`: do not touch the `nf_conntrack` sysctls.
 
-## IPFIX record layout (14 fields, 58 bytes)
+The effective configuration is logged at startup, including the record size and
+how many records fit in a message.
 
-| # | Information Element | ID | Bytes |
+## Protocol and profiles
+
+The NAT elements this exporter relies on — `natEvent` and the four `postNAT*`
+elements — are IPFIX registry entries and are **not** in RFC 3954's NetFlow v9
+field table. They are a Cisco NAT Event Logging convention there. Support
+varies by collector and by collector version, which is what the profiles are
+for: pick the largest field set your collector actually decodes.
+
+| Profile | Fields | Record (8B / 4B counters) | Carries |
 |---|---|---|---|
-| 1 | `natEvent` | 230 | 1 |
-| 2 | `protocolIdentifier` | 4 | 1 |
-| 3 | `sourceIPv4Address` | 8 | 4 |
-| 4 | `destinationIPv4Address` | 12 | 4 |
-| 5 | `sourceTransportPort` | 7 | 2 |
-| 6 | `destinationTransportPort` | 11 | 2 |
-| 7 | `postNATSourceIPv4Address` | 225 | 4 |
-| 8 | `postNAPTSourceTransportPort` | 227 | 2 |
-| 9 | `postNATDestinationIPv4Address` | 226 | 4 |
-| 10 | `postNAPTDestinationTransportPort` | 228 | 2 |
-| 11 | `octetDeltaCount` | 1 | 8 |
-| 12 | `packetDeltaCount` | 2 | 8 |
-| 13 | `reverseOctetDeltaCount` | 1 + PEN 29305 | 8 |
-| 14 | `reversePacketDeltaCount` | 2 + PEN 29305 | 8 |
+| `full` | 14 | 58 B / 42 B | Both NAT directions and both counter directions |
+| `nat-source` | 12 | 52 B / 36 B | Source translation only; drops `postNATDestination*` |
+| `flow-only` | 9 | 45 B / 29 B | **No NAT information at all** — pre-NAT five-tuple and counters only |
+
+Rough starting points, worth confirming against your own version: pmacct
+(`nfacctd`) and nfdump 1.7+ handle `full`; ntopng and NEL-aware commercial
+collectors generally do too. Collectors limited to their base registry need
+`flow-only`, which is a real loss of information — it exports the flow but not
+the translation. Use `tshark -d udp.port==<port>,cflow -V` to see exactly what a
+dissector makes of your export before blaming a collector.
+
+`--counter-width 4` exists because NetFlow v9's `IN_BYTES`/`OUT_BYTES` default to
+four bytes and some collectors expect exactly that. Conntrack counters are 64-bit,
+so a value too large for a four-byte field is **clamped, not truncated**, and the
+clamp count is reported in the periodic stats line.
+
+## Record layout
+
+Both protocols carry the same field values in the same order; they differ only in
+how the elements are identified.
+
+| # | Field | IPFIX IE | NetFlow v9 type | Bytes | Profiles |
+|---|---|---|---|---|---|
+| 1 | `natEvent` | 230 | 230 | 1 | full, nat-source |
+| 2 | `protocolIdentifier` | 4 | 4 `PROTOCOL` | 1 | all |
+| 3 | `sourceIPv4Address` | 8 | 8 `IPV4_SRC_ADDR` | 4 | all |
+| 4 | `destinationIPv4Address` | 12 | 12 `IPV4_DST_ADDR` | 4 | all |
+| 5 | `sourceTransportPort` | 7 | 7 `L4_SRC_PORT` | 2 | all |
+| 6 | `destinationTransportPort` | 11 | 11 `L4_DST_PORT` | 2 | all |
+| 7 | `postNATSourceIPv4Address` | 225 | 225 | 4 | full, nat-source |
+| 8 | `postNAPTSourceTransportPort` | 227 | 227 | 2 | full, nat-source |
+| 9 | `postNATDestinationIPv4Address` | 226 | 226 | 4 | full |
+| 10 | `postNAPTDestinationTransportPort` | 228 | 228 | 2 | full |
+| 11 | `octetDeltaCount` | 1 | 1 `IN_BYTES` | 4 or 8 | all |
+| 12 | `packetDeltaCount` | 2 | 2 `IN_PKTS` | 4 or 8 | all |
+| 13 | reply octets | 1 + PEN 29305 | 23 `OUT_BYTES` | 4 or 8 | all |
+| 14 | reply packets | 2 + PEN 29305 | 24 `OUT_PKTS` | 4 or 8 | all |
 
 Fields 7–10 come from the conntrack reply tuple, so SNAT, DNAT and combined
 translations all report the address and port they actually rewrote; a direction
 that was not translated simply repeats the original value.
 
-Fields 13 and 14 are RFC 5103 reverse Information Elements, which is how a
-bidirectional flow reports its reply direction. Collectors must handle
-enterprise-specific field specifiers to decode them.
+Fields 13 and 14 report the flow's reply direction. Under IPFIX that is an RFC
+5103 reverse Information Element, so the collector must handle enterprise-specific
+field specifiers. NetFlow v9 has no enterprise mechanism, so it uses the dedicated
+`OUT_BYTES`/`OUT_PKTS` types instead. Note these are *not* interchangeable: IEs
+23/24 under IPFIX mean `postOctetDeltaCount`/`postPacketDeltaCount`, the forward
+direction as modified by a middlebox, which is a different quantity.
 
 Counters come from the conntrack accounting counters, so they are zero on CREATE
 events and hold the flow's totals on DELETE.
@@ -109,7 +157,11 @@ events and hold the flow's totals on DELETE.
 ## Notes
 
 - Uses only a small set of dependencies and manual encoding/parsing for hot-path efficiency.
-- Messages are capped to an MTU-safe size of 1472 bytes.
+- Messages are capped to an MTU-safe size of 1472 bytes. NetFlow v9 FlowSets are
+  padded to a 4-byte boundary as RFC 3954 asks.
+- One process speaks one protocol to one collector. Two collectors means two
+  instances, and each is a separate netlink multicast subscriber, so the kernel
+  copies every conntrack event once per instance.
 - Every 10 seconds, any netlink drops, UDP send failures, truncated datagrams and
   messages from a non-kernel sender are logged.
 - The daemon runs as root throughout; it does not yet drop privileges after
