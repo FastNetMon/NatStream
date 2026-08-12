@@ -7,7 +7,8 @@ use std::io;
 use std::ffi::CString;
 use std::fs;
 use std::net::{SocketAddr, UdpSocket};
-use std::thread;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use std::time::Duration;
 
@@ -23,6 +24,19 @@ use signals::SignalFd;
 /// How long the supervisor waits for the worker to exit on its own after
 /// SIGTERM before escalating to SIGKILL.
 const WORKER_STOP_GRACE: Duration = Duration::from_secs(10);
+
+/// Delay before the first restart, doubled on each successive failure.
+const RESTART_BACKOFF_MIN: Duration = Duration::from_secs(1);
+
+/// Ceiling for the restart delay.
+const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+/// A worker that stayed up at least this long is treated as a fresh failure
+/// rather than part of a crash loop, and resets the backoff.
+const HEALTHY_RUNTIME: Duration = Duration::from_secs(60);
+
+const CONNTRACK_ACCT_SYSCTL: &str = "/proc/sys/net/netfilter/nf_conntrack_acct";
+const CONNTRACK_EVENTS_SYSCTL: &str = "/proc/sys/net/netfilter/nf_conntrack_events";
 
 #[derive(Parser, Debug)]
 #[command(name = "conntrack_exporter", about = "Conntrack NAT event IPFIX exporter")]
@@ -50,6 +64,14 @@ struct Args {
     /// Run as a background daemon with self-supervision
     #[arg(long)]
     daemon: bool,
+
+    /// In --daemon mode, append log output to this file instead of discarding it
+    #[arg(long, value_name = "PATH")]
+    log_file: Option<PathBuf>,
+
+    /// Do not touch the nf_conntrack sysctls; assume they are already set
+    #[arg(long)]
+    no_sysctl: bool,
 }
 
 fn main() -> Result<()> {
@@ -70,7 +92,7 @@ fn main() -> Result<()> {
 
 fn run_worker(args: &Args) -> Result<()> {
     info!("Starting conntrack_exporter worker, collector={}", args.collector);
-    apply_conntrack_sysctl_settings()?;
+    apply_conntrack_sysctl_settings(args)?;
 
     // Consume shutdown signals through a descriptor so they are observed by the
     // same poll() that waits for netlink data, with no EINTR races.
@@ -253,7 +275,7 @@ fn run_supervisor(args: &Args) -> Result<()> {
     if unsafe { libc::setsid() } < 0 {
         return Err(anyhow::anyhow!("setsid() failed: {}", io::Error::last_os_error()));
     }
-    redirect_stdio_to_devnull()?;
+    redirect_stdio(args.log_file.as_deref())?;
 
     // SIGCHLD is included so a worker exit wakes the poll() below, letting the
     // supervisor wait on signals and child status through one descriptor.
@@ -261,7 +283,9 @@ fn run_supervisor(args: &Args) -> Result<()> {
         .context("Failed to set up signal handling")?;
 
     info!("Supervisor started, pid={}", std::process::id());
+    let mut backoff = RESTART_BACKOFF_MIN;
     loop {
+        let started = Instant::now();
         let child_pid = unsafe { libc::fork() };
         if child_pid < 0 {
             return Err(anyhow::anyhow!(
@@ -297,8 +321,18 @@ fn run_supervisor(args: &Args) -> Result<()> {
                     info!("Worker exited cleanly; supervisor stopping");
                     break;
                 }
-                warn!("Worker terminated (status=0x{:x}); restarting in 1s", status);
-                thread::sleep(Duration::from_secs(1));
+                // A worker that stayed up is a fresh failure, not a crash loop.
+                if started.elapsed() >= HEALTHY_RUNTIME {
+                    backoff = RESTART_BACKOFF_MIN;
+                }
+                warn!(
+                    "Worker terminated (status=0x{:x}); restarting in {:?}",
+                    status, backoff
+                );
+                if wait_before_restart(&signals, backoff)? {
+                    break;
+                }
+                backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
             }
         }
     }
@@ -366,6 +400,36 @@ fn supervise_child(signals: &SignalFd, child_pid: libc::pid_t) -> Result<Supervi
     }
 }
 
+/// Wait out the restart backoff, returning true if a shutdown signal arrives
+/// first — the delay must not make the daemon unresponsive to SIGTERM.
+fn wait_before_restart(signals: &SignalFd, delay: Duration) -> Result<bool> {
+    let deadline = Instant::now() + delay;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(false);
+        }
+
+        let ready = match signals::poll_readable(signals.as_raw_fd(), ms_until(deadline, now)) {
+            Ok(ready) => ready,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e).context("poll() on signalfd failed"),
+        };
+
+        if ready {
+            for sig in signals
+                .read_pending()
+                .context("failed to read signalfd")?
+                .into_iter()
+                .filter(|&sig| sig != libc::SIGCHLD)
+            {
+                info!("Received signal {} while waiting to restart", sig);
+                return Ok(true);
+            }
+        }
+    }
+}
+
 /// Reap the worker if it has already exited, without blocking.
 fn try_reap(child_pid: libc::pid_t) -> Result<Option<libc::c_int>> {
     let mut status: libc::c_int = 0;
@@ -398,30 +462,50 @@ fn should_restart(status: libc::c_int) -> bool {
     }
 }
 
-fn redirect_stdio_to_devnull() -> Result<()> {
-    let devnull = CString::new("/dev/null").expect("static string");
-    let fd = unsafe { libc::open(devnull.as_ptr(), libc::O_RDWR) };
+/// Detach stdio from the terminal. Log output goes to `log_file` when given;
+/// otherwise it is discarded, which leaves the daemon unable to explain itself.
+fn redirect_stdio(log_file: Option<&Path>) -> Result<()> {
+    let devnull = open_fd(Path::new("/dev/null"), libc::O_RDWR, 0)?;
+
+    let out_fd = match log_file {
+        Some(path) => open_fd(
+            path,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+            0o640,
+        )?,
+        None => devnull,
+    };
+
+    let result = (|| {
+        dup2_checked(devnull, libc::STDIN_FILENO)?;
+        dup2_checked(out_fd, libc::STDOUT_FILENO)?;
+        dup2_checked(out_fd, libc::STDERR_FILENO)
+    })();
+
+    if out_fd != devnull && out_fd > libc::STDERR_FILENO {
+        unsafe { libc::close(out_fd) };
+    }
+    if devnull > libc::STDERR_FILENO {
+        unsafe { libc::close(devnull) };
+    }
+
+    result
+}
+
+fn open_fd(path: &Path, flags: libc::c_int, mode: libc::c_uint) -> Result<libc::c_int> {
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .with_context(|| format!("path {} contains a NUL byte", path.display()))?;
+    let fd = unsafe { libc::open(c_path.as_ptr(), flags, mode) };
     if fd < 0 {
-        return Err(anyhow::anyhow!(
-            "open(/dev/null) failed: {}",
-            io::Error::last_os_error()
-        ));
+        return Err(io::Error::last_os_error())
+            .with_context(|| format!("failed to open {}", path.display()));
     }
+    Ok(fd)
+}
 
-    for target_fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
-        if unsafe { libc::dup2(fd, target_fd) } < 0 {
-            let err = io::Error::last_os_error();
-            unsafe {
-                libc::close(fd);
-            }
-            return Err(anyhow::anyhow!("dup2() failed: {}", err));
-        }
-    }
-
-    if fd > libc::STDERR_FILENO {
-        unsafe {
-            libc::close(fd);
-        }
+fn dup2_checked(fd: libc::c_int, target_fd: libc::c_int) -> Result<()> {
+    if unsafe { libc::dup2(fd, target_fd) } < 0 {
+        return Err(io::Error::last_os_error()).context("dup2() failed");
     }
     Ok(())
 }
@@ -461,9 +545,26 @@ fn set_send_buf(socket: &UdpSocket, size: usize) {
     }
 }
 
-fn apply_conntrack_sysctl_settings() -> Result<()> {
-    set_proc_sysctl("/proc/sys/net/netfilter/nf_conntrack_acct", "1")?;
-    set_proc_sysctl("/proc/sys/net/netfilter/nf_conntrack_events", "1")?;
+fn apply_conntrack_sysctl_settings(args: &Args) -> Result<()> {
+    if args.no_sysctl {
+        info!("Skipping conntrack sysctl setup (--no-sysctl)");
+        return Ok(());
+    }
+
+    // Without event delivery there is nothing at all to export, so a failure
+    // here is worth refusing to start over.
+    set_proc_sysctl(CONNTRACK_EVENTS_SYSCTL, "1").context(
+        "failed to enable conntrack event delivery; load the nf_conntrack \
+         module, run with CAP_NET_ADMIN, or pass --no-sysctl if the sysctls \
+         are already set",
+    )?;
+
+    // Without accounting the flows are still exported, just with zero counters.
+    // That is degraded, not fatal.
+    if let Err(e) = set_proc_sysctl(CONNTRACK_ACCT_SYSCTL, "1") {
+        warn!("conntrack accounting unavailable, counters will be zero: {:#}", e);
+    }
+
     Ok(())
 }
 
