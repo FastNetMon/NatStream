@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+PKG=conntrack-exporter
+
+# On upgrade the new postinst restarts it; only stop for a real removal.
+if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
+    if [ -d /run/systemd/system ]; then
+        systemctl stop "${PKG}.service" >/dev/null 2>&1 || true
+    fi
+fi
+
+exit 0

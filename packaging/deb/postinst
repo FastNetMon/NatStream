@@ -1,0 +1,30 @@
+#!/bin/sh
+set -e
+
+PKG=conntrack-exporter
+
+if [ "$1" = "configure" ]; then
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        # Restart on upgrade, but only if the admin had it running.
+        if systemctl is-active --quiet "${PKG}.service" 2>/dev/null; then
+            systemctl restart "${PKG}.service" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # Deliberately not enabled or started on a fresh install: the service needs
+    # a collector address, and starting it without one would only produce a
+    # restart loop in the journal.
+    if [ -z "$2" ]; then
+        cat <<EOF
+
+${PKG} is installed but not enabled.
+
+  1. set COLLECTOR in /etc/default/${PKG}
+  2. systemctl enable --now ${PKG}.service
+
+EOF
+    fi
+fi
+
+exit 0

@@ -1,0 +1,26 @@
+# Configuration for conntrack-exporter.service
+#
+# The service will not start until COLLECTOR is set, because there is no
+# sensible default for where your flow records should go.
+
+# Flow collector endpoint, as ip:port. Conventional ports are 4739 for IPFIX
+# and 2055 for NetFlow v9. IPv4 only.
+COLLECTOR=
+
+# Any additional flags, passed through verbatim. Whitespace separated.
+#
+#   --protocol ipfix|netflow9        export protocol (default: ipfix)
+#   --profile full|nat-source|flow-only
+#                                    which field set to export (default: full)
+#   --counter-width 4|8              counter width in bytes (default: 8)
+#   --domain-id <n>                  observation domain / source ID
+#   --template-id <n>                template ID to advertise (default: 256)
+#   --template-interval <secs>       template retransmit period (default: 30)
+#   --no-sysctl                      do not touch the nf_conntrack sysctls
+#   -v                               debug logging
+#
+# Run `conntrack_exporter --help` for the full list.
+#
+# Example:
+#   EXPORTER_OPTS=--protocol netflow9 --profile nat-source --counter-width 4
+EXPORTER_OPTS=

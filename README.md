@@ -16,6 +16,77 @@ It listens to netlink conntrack notifications, extracts NAT-relevant flow fields
   - 100ms timeout flush for sparse traffic
 - Supports a simple self-supervised daemon mode that restarts the worker process on crash, with exponential backoff.
 
+## Install (Debian / Ubuntu)
+
+`./build.sh` produces a `.deb` for a target distribution, built inside a Docker
+container based on that distribution. No build tooling is needed on the host
+beyond Docker.
+
+```bash
+./build.sh trixie      # Debian 13        -> dist/conntrack-exporter_*~deb13_*.deb
+./build.sh 24.04       # Ubuntu 24.04 LTS -> dist/conntrack-exporter_*~ubuntu24.04_*.deb
+./build.sh 26.04       # Ubuntu 26.04 LTS -> dist/conntrack-exporter_*~ubuntu26.04_*.deb
+./build.sh all         # all three
+```
+
+The Rust toolchain is pinned (`RUST_VERSION`, default 1.97.1) and installed in the
+container, because the distros' own `rustc` is not usable across all targets —
+Ubuntu 24.04 ships 1.75 and this crate needs 1.85+ for edition 2024. Each target
+links its own distro's glibc and gets a `libc6` dependency derived from the
+binary with `dpkg-shlibdeps`, rather than a guess. In practice the binary
+currently only needs `GLIBC_2.34`, so the three are interchangeable today; the
+per-distro build is what keeps that true if it ever stops being.
+
+Override the packaging metadata with `MAINTAINER=`, `DEB_REVISION=` and
+`RUST_VERSION=` in the environment. `./build.sh --help` lists everything.
+
+### The package
+
+| Path | |
+|---|---|
+| `/usr/sbin/conntrack_exporter` | the daemon |
+| `/lib/systemd/system/conntrack-exporter.service` | the service unit |
+| `/etc/default/conntrack-exporter` | configuration (a dpkg conffile) |
+
+Installing does **not** enable or start the service, because it has no useful
+default collector and would only produce a restart loop. Configure it first:
+
+```bash
+sudo dpkg -i conntrack-exporter_0.1.0-1~deb13_amd64.deb
+sudoedit /etc/default/conntrack-exporter        # set COLLECTOR=ip:port
+sudo systemctl enable --now conntrack-exporter.service
+journalctl -u conntrack-exporter -f
+```
+
+`/etc/default/conntrack-exporter` holds the collector endpoint and any extra
+flags:
+
+```sh
+COLLECTOR=203.0.113.10:4739
+EXPORTER_OPTS=--protocol netflow9 --profile nat-source --counter-width 4
+```
+
+### The service
+
+The unit runs the daemon in the foreground under `Type=simple` and lets journald
+take its output — systemd supervises it, so the daemon's own `--daemon`
+supervisor is not used and would only get in the way.
+
+It does **not run as root**. The exporter needs `CAP_NET_ADMIN` to join the
+conntrack netlink group, force its socket buffer sizes, and set the
+`nf_conntrack` sysctls — the kernel's net sysctl handler grants `CAP_NET_ADMIN`
+holders owner-level access, so no root and no `CAP_DAC_OVERRIDE` are required.
+The unit therefore uses `DynamicUser=yes` with exactly that one capability,
+plus the usual sandboxing (`ProtectHome`, `PrivateDevices`, `ProtectProc`,
+`RestrictAddressFamilies=AF_NETLINK AF_INET AF_INET6`, a `@system-service`
+syscall filter, and no new privileges). `systemd-analyze security` rates it 2.6.
+
+One directive is deliberately absent: `ProtectKernelTunables=yes` would remount
+`/proc/sys` read-only and break the sysctl setup the exporter does at startup.
+If you would rather lock that down, set the two sysctls declaratively in
+`/etc/sysctl.d/`, add `--no-sysctl` to `EXPORTER_OPTS`, and then add
+`ProtectKernelTunables=yes` to a unit override.
+
 ## Requirements
 
 - Linux (Netlink netfilter API required)

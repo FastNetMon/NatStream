@@ -1,0 +1,53 @@
+[Unit]
+Description=conntrack NAT event IPFIX / NetFlow v9 exporter
+Documentation=file:/usr/share/doc/conntrack-exporter/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/conntrack-exporter
+ExecStart=/usr/sbin/conntrack_exporter --collector ${COLLECTOR} $EXPORTER_OPTS
+
+# Run in the foreground and let journald take stderr. The daemon's own
+# --daemon supervisor exists for init systems that cannot do this, and would
+# only get in systemd's way here.
+Restart=on-failure
+RestartSec=5s
+
+# The exporter needs CAP_NET_ADMIN to join the conntrack netlink group, to force
+# the socket buffer sizes, and to set the nf_conntrack sysctls -- the net sysctl
+# handler grants CAP_NET_ADMIN holders owner-level access, so this works without
+# being root. It needs nothing else, so it does not run as root: systemd
+# allocates a transient unprivileged user and grants that one capability.
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+# Netlink for conntrack events, INET for the collector.
+RestrictAddressFamilies=AF_NETLINK AF_INET AF_INET6
+
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectClock=yes
+ProtectProc=invisible
+PrivateDevices=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+
+# ProtectKernelTunables is deliberately NOT set: it would remount /proc/sys
+# read-only, and the exporter writes nf_conntrack_events and nf_conntrack_acct
+# at startup. To lock that down too, set both sysctls declaratively (a file in
+# /etc/sysctl.d), add --no-sysctl to EXPORTER_OPTS, and then add
+# ProtectKernelTunables=yes here.
+
+[Install]
+WantedBy=multi-user.target

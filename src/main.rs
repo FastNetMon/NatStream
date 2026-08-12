@@ -39,7 +39,11 @@ const CONNTRACK_ACCT_SYSCTL: &str = "/proc/sys/net/netfilter/nf_conntrack_acct";
 const CONNTRACK_EVENTS_SYSCTL: &str = "/proc/sys/net/netfilter/nf_conntrack_events";
 
 #[derive(Parser, Debug)]
-#[command(name = "conntrack_exporter", about = "Conntrack NAT event IPFIX / NetFlow v9 exporter")]
+#[command(
+    name = "conntrack_exporter",
+    version,
+    about = "Conntrack NAT event IPFIX / NetFlow v9 exporter"
+)]
 struct Args {
     /// Flow collector address (ip:port)
     #[arg(short, long)]
