@@ -204,15 +204,11 @@ fn parse_tuple_ip(data: &[u8], src_ip: &mut Ipv4Addr, dst_ip: &mut Ipv4Addr) {
         let payload = &data[offset + NLA_HDRLEN..offset + nla_len];
 
         match nla_type {
-            CTA_IP_V4_SRC => {
-                if payload.len() >= 4 {
-                    *src_ip = Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3]);
-                }
+            CTA_IP_V4_SRC if payload.len() >= 4 => {
+                *src_ip = Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3]);
             }
-            CTA_IP_V4_DST => {
-                if payload.len() >= 4 {
-                    *dst_ip = Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3]);
-                }
+            CTA_IP_V4_DST if payload.len() >= 4 => {
+                *dst_ip = Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3]);
             }
             _ => {}
         }
@@ -235,21 +231,9 @@ fn parse_tuple_proto(data: &[u8], protocol: &mut u8, src_port: &mut u16, dst_por
         let payload = &data[offset + NLA_HDRLEN..offset + nla_len];
 
         match nla_type {
-            CTA_PROTO_NUM => {
-                if !payload.is_empty() {
-                    *protocol = payload[0];
-                }
-            }
-            CTA_PROTO_SRC_PORT => {
-                if payload.len() >= 2 {
-                    *src_port = read_u16_be(payload);
-                }
-            }
-            CTA_PROTO_DST_PORT => {
-                if payload.len() >= 2 {
-                    *dst_port = read_u16_be(payload);
-                }
-            }
+            CTA_PROTO_NUM if !payload.is_empty() => *protocol = payload[0],
+            CTA_PROTO_SRC_PORT if payload.len() >= 2 => *src_port = read_u16_be(payload),
+            CTA_PROTO_DST_PORT if payload.len() >= 2 => *dst_port = read_u16_be(payload),
             _ => {}
         }
 
@@ -271,16 +255,8 @@ fn parse_counters(data: &[u8], bytes: &mut u64, packets: &mut u64) {
         let payload = &data[offset + NLA_HDRLEN..offset + nla_len];
 
         match nla_type {
-            CTA_COUNTERS_PACKETS => {
-                if payload.len() >= 8 {
-                    *packets = read_u64_be(payload);
-                }
-            }
-            CTA_COUNTERS_BYTES => {
-                if payload.len() >= 8 {
-                    *bytes = read_u64_be(payload);
-                }
-            }
+            CTA_COUNTERS_PACKETS if payload.len() >= 8 => *packets = read_u64_be(payload),
+            CTA_COUNTERS_BYTES if payload.len() >= 8 => *bytes = read_u64_be(payload),
             _ => {}
         }
 

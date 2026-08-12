@@ -506,16 +506,15 @@ fn wait_before_restart(signals: &SignalFd, delay: Duration) -> Result<bool> {
             Err(e) => return Err(e).context("poll() on signalfd failed"),
         };
 
-        if ready {
-            for sig in signals
+        if ready
+            && let Some(sig) = signals
                 .read_pending()
                 .context("failed to read signalfd")?
                 .into_iter()
-                .filter(|&sig| sig != libc::SIGCHLD)
-            {
-                info!("Received signal {} while waiting to restart", sig);
-                return Ok(true);
-            }
+                .find(|&sig| sig != libc::SIGCHLD)
+        {
+            info!("Received signal {} while waiting to restart", sig);
+            return Ok(true);
         }
     }
 }
