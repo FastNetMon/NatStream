@@ -27,8 +27,8 @@ const WORKER_STOP_GRACE: Duration = Duration::from_secs(10);
 #[derive(Parser, Debug)]
 #[command(name = "conntrack_exporter", about = "Conntrack NAT event IPFIX exporter")]
 struct Args {
-    /// IPFIX collector address (host:port)
-    #[arg(short, long, default_value = "10.168.120.66:4739")]
+    /// IPFIX collector address (ip:port)
+    #[arg(short, long)]
     collector: SocketAddr,
 
     /// Netlink receive buffer size in bytes
