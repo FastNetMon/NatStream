@@ -9,6 +9,12 @@ pub const NETLINK_NO_ENOBUFS: libc::c_int = 5;
 pub const NFNLGRP_CONNTRACK_NEW: libc::c_int = 1;
 pub const NFNLGRP_CONNTRACK_DESTROY: libc::c_int = 3;
 
+// nfnetlink subsystem ID, carried in the high byte of nlmsg_type
+pub const NFNL_SUBSYS_CTNETLINK: u16 = 1;
+
+// Netlink control message types occupy everything below NLMSG_MIN_TYPE
+pub const NLMSG_MIN_TYPE: u16 = 0x10;
+
 // Conntrack event types (from nlmsg_type & 0xFF)
 pub const IPCTNL_MSG_CT_NEW: u8 = 0;
 pub const IPCTNL_MSG_CT_DELETE: u8 = 2;

@@ -23,6 +23,15 @@ where
             break;
         }
 
+        // Only conntrack messages carry the event layout parsed below. Without
+        // this check the low byte alone decides, and NLMSG_ERROR (0x2) is
+        // indistinguishable from IPCTNL_MSG_CT_DELETE, as is any message from
+        // another nfnetlink subsystem whose type happens to collide.
+        if nlmsg_type < NLMSG_MIN_TYPE || (nlmsg_type >> 8) != NFNL_SUBSYS_CTNETLINK {
+            offset = nla_align(offset + nlmsg_len);
+            continue;
+        }
+
         // Determine event type from nlmsg_type subsystem message
         let msg_type = (nlmsg_type & 0xFF) as u8;
         let nat_event = match msg_type {
