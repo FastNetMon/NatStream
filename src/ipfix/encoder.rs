@@ -11,6 +11,8 @@ pub struct IpfixEncoder {
     offset: usize,
     record_count: u32,
     data_set_offset: usize,
+    data_set_open: bool,
+    template_included: bool,
     sequence_number: u32,
     observation_domain_id: u32,
 }
@@ -22,16 +24,23 @@ impl IpfixEncoder {
             offset: 0,
             record_count: 0,
             data_set_offset: 0,
+            data_set_open: false,
+            template_included: false,
             sequence_number: 0,
             observation_domain_id,
         }
     }
 
-    /// Begin a new IPFIX message. If `include_template` is true, the template set
-    /// is written first. The data set header is always written.
+    /// Begin a new IPFIX message. If `include_template` is true, the template
+    /// set is written first.
+    ///
+    /// The data set header is deferred until the first record, so a message
+    /// that ends up with no records carries no empty data set — which lets a
+    /// template be sent on its own when there is no traffic to attach it to.
     pub fn begin_message(&mut self, include_template: bool) {
-        self.offset = 0;
         self.record_count = 0;
+        self.data_set_open = false;
+        self.template_included = include_template;
 
         // Reserve space for IPFIX message header (filled in finalize)
         self.offset = IPFIX_HEADER_LEN;
@@ -40,18 +49,27 @@ impl IpfixEncoder {
         if include_template {
             self.write_template_set();
         }
-
-        // Write data set header (set_id = template ID, length = placeholder)
-        self.data_set_offset = self.offset;
-        self.write_u16(NAT_TEMPLATE_ID); // set ID
-        self.write_u16(0); // length placeholder
     }
 
     /// Try to add a record to the current message. Returns false if the message
     /// is full and the record was not added.
     pub fn add_record(&mut self, event: &ConntrackEvent) -> bool {
-        if self.offset + DATA_RECORD_SIZE > MAX_IPFIX_MSG_SIZE {
+        // The data set header has to fit too if this is the first record.
+        let needed = if self.data_set_open {
+            DATA_RECORD_SIZE
+        } else {
+            SET_HEADER_LEN + DATA_RECORD_SIZE
+        };
+        if self.offset + needed > MAX_IPFIX_MSG_SIZE {
             return false;
+        }
+
+        if !self.data_set_open {
+            // Data set header (set_id = template ID, length = placeholder)
+            self.data_set_offset = self.offset;
+            self.write_u16(NAT_TEMPLATE_ID);
+            self.write_u16(0);
+            self.data_set_open = true;
         }
 
         // natEvent (1 byte)
@@ -102,9 +120,15 @@ impl IpfixEncoder {
         true
     }
 
-    /// Returns true if at least one record has been added.
-    pub fn has_records(&self) -> bool {
-        self.record_count > 0
+    /// Returns true if the current message carries the template set.
+    pub fn template_included(&self) -> bool {
+        self.template_included
+    }
+
+    /// Returns true if the current message is worth sending: it holds records,
+    /// the template, or both.
+    pub fn has_pending_output(&self) -> bool {
+        self.record_count > 0 || self.template_included
     }
 
     /// Finalize the message: fill in IPFIX header and data set length.
@@ -128,10 +152,12 @@ impl IpfixEncoder {
         // Observation Domain ID (4 bytes)
         self.buf[12..16].copy_from_slice(&self.observation_domain_id.to_be_bytes());
 
-        // Fill data set length
-        let data_set_len = (self.offset - self.data_set_offset) as u16;
-        self.buf[self.data_set_offset + 2..self.data_set_offset + 4]
-            .copy_from_slice(&data_set_len.to_be_bytes());
+        // Fill data set length, if this message has a data set at all
+        if self.data_set_open {
+            let data_set_len = (self.offset - self.data_set_offset) as u16;
+            self.buf[self.data_set_offset + 2..self.data_set_offset + 4]
+                .copy_from_slice(&data_set_len.to_be_bytes());
+        }
 
         // Update sequence number (cumulative record count). RFC 7011 expects
         // this counter to wrap at 2^32 rather than to be an error.

@@ -140,18 +140,19 @@ fn run_worker(args: &Args) -> Result<()> {
 
     info!("Listening for conntrack NAT events...");
 
+    let template_interval = Duration::from_secs(ipfix::constants::TEMPLATE_RETRANSMIT_INTERVAL);
+    let stats_interval = Duration::from_secs(STATS_INTERVAL_SECS);
+
     let mut running = true;
     while running {
         // Check if template retransmit is due
         let now = Instant::now();
-        if now.duration_since(last_template_time).as_secs()
-            >= ipfix::constants::TEMPLATE_RETRANSMIT_INTERVAL
-        {
+        if now.duration_since(last_template_time) >= template_interval {
             include_template = true;
         }
 
         // Report drop stats every 10 seconds
-        if now.duration_since(last_stats_time).as_secs() >= STATS_INTERVAL_SECS {
+        if now.duration_since(last_stats_time) >= stats_interval {
             // The kernel drop counter is a u32 that wraps, and reads as 0 if
             // SO_MEMINFO is unavailable, so it is not monotonic in practice.
             let nl_drops = nl_socket.get_drops();
@@ -180,8 +181,31 @@ fn run_worker(args: &Args) -> Result<()> {
             last_stats_time = now;
         }
 
-        // Poll: use flush timeout if we have pending records, otherwise block
-        let timeout = if message_active { FLUSH_TIMEOUT_MS } else { -1 };
+        // A retransmit falling due with nothing buffered goes out on its own,
+        // so a collector that ages templates out is refreshed even when the
+        // link is idle.
+        if include_template && !message_active {
+            encoder.begin_message(true);
+            flush_message(
+                &mut encoder,
+                &udp_socket,
+                &mut send_errors,
+                &mut include_template,
+                &mut last_template_time,
+                "template",
+            );
+        }
+
+        // Poll: use the flush timeout if a message is buffered, otherwise sleep
+        // until the next timer is due. Signals arrive on the signalfd, so there
+        // is no reason to wake up otherwise.
+        let timeout = if message_active {
+            FLUSH_TIMEOUT_MS
+        } else {
+            let next_deadline =
+                (last_template_time + template_interval).min(last_stats_time + stats_interval);
+            ms_until(next_deadline, Instant::now())
+        };
         let (ready, signalled) = match nl_socket.poll_with(signals.as_raw_fd(), timeout) {
             Ok(state) => state,
             Err(e) => {
@@ -203,14 +227,19 @@ fn run_worker(args: &Args) -> Result<()> {
         }
 
         if !ready {
-            // Timeout — flush pending records
-            if message_active && encoder.has_records() {
-                let (data, count) = encoder.finalize();
-                if let Err(e) = udp_socket.send(data) {
-                    send_errors += 1;
-                    warn!("sendto() failed: {}", e);
-                }
-                debug!("Sent IPFIX message with {} records (flush)", count);
+            // Timeout — flush whatever is buffered. Clear the active flag even
+            // when there was nothing to send, so a message begun for a batch
+            // that turned out to hold no NAT events does not keep the loop on
+            // the short flush timeout indefinitely.
+            if message_active {
+                flush_message(
+                    &mut encoder,
+                    &udp_socket,
+                    &mut send_errors,
+                    &mut include_template,
+                    &mut last_template_time,
+                    "flush",
+                );
                 message_active = false;
             }
             continue;
@@ -249,10 +278,6 @@ fn run_worker(args: &Args) -> Result<()> {
         // Ensure we have an active message
         if !message_active {
             encoder.begin_message(include_template);
-            if include_template {
-                include_template = false;
-                last_template_time = Instant::now();
-            }
             message_active = true;
         }
 
@@ -262,18 +287,16 @@ fn run_worker(args: &Args) -> Result<()> {
 
             if !encoder.add_record(&event) {
                 // Message full — finalize and send, then start a new one
-                let (data, count) = encoder.finalize();
-                if let Err(e) = udp_socket.send(data) {
-                    send_errors += 1;
-                    warn!("sendto() failed: {}", e);
-                }
-                debug!("Sent IPFIX message with {} records", count);
+                flush_message(
+                    &mut encoder,
+                    &udp_socket,
+                    &mut send_errors,
+                    &mut include_template,
+                    &mut last_template_time,
+                    "full",
+                );
 
                 encoder.begin_message(include_template);
-                if include_template {
-                    include_template = false;
-                    last_template_time = Instant::now();
-                }
                 if !encoder.add_record(&event) {
                     error!("BUG: failed to add record to fresh message");
                 }
@@ -282,16 +305,51 @@ fn run_worker(args: &Args) -> Result<()> {
     }
 
     // Flush remaining records on shutdown
-    if message_active && encoder.has_records() {
-        let (data, count) = encoder.finalize();
-        if let Err(e) = udp_socket.send(data) {
-            warn!("sendto() failed: {}", e);
-        }
-        debug!("Sent IPFIX message with {} records (shutdown)", count);
+    if message_active {
+        flush_message(
+            &mut encoder,
+            &udp_socket,
+            &mut send_errors,
+            &mut include_template,
+            &mut last_template_time,
+            "shutdown",
+        );
     }
 
     info!("Worker shutting down.");
     Ok(())
+}
+
+/// Send the buffered IPFIX message, if it holds anything worth sending.
+///
+/// A message carrying the template settles the retransmit schedule whether or
+/// not the send succeeds: retrying immediately would spin, and the next
+/// interval will carry the template again anyway.
+fn flush_message(
+    encoder: &mut IpfixEncoder,
+    udp_socket: &UdpSocket,
+    send_errors: &mut u64,
+    include_template: &mut bool,
+    last_template_time: &mut Instant,
+    reason: &str,
+) {
+    if !encoder.has_pending_output() {
+        return;
+    }
+
+    if encoder.template_included() {
+        *include_template = false;
+        *last_template_time = Instant::now();
+    }
+
+    let (data, count) = encoder.finalize();
+    match udp_socket.send(data) {
+        Ok(_) => debug!("Sent IPFIX message with {} records ({})", count, reason),
+        Err(e) => {
+            *send_errors += 1;
+            warn!("sendto() failed: {}", e);
+        }
+    }
 }
 
 fn run_supervisor(args: &Args) -> Result<()> {
