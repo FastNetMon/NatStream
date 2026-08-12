@@ -1,5 +1,5 @@
 mod event;
-mod ipfix;
+mod export;
 mod netlink;
 mod signals;
 
@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use log::{debug, error, info, warn};
 
-use ipfix::IpfixEncoder;
+use export::{CounterWidth, Encoder, Profile, Template};
 use netlink::constants::{DEFAULT_RECV_BUF_SIZE, DEFAULT_SEND_BUF_SIZE};
 use netlink::{parse_conntrack_messages, NetlinkSocket};
 use signals::SignalFd;
@@ -53,9 +53,25 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_SEND_BUF_SIZE)]
     send_buf: usize,
 
-    /// IPFIX observation domain ID
+    /// Observation domain ID
     #[arg(long, default_value_t = 0)]
     domain_id: u32,
+
+    /// Which field set to export
+    #[arg(long, value_enum, default_value_t = Profile::Full)]
+    profile: Profile,
+
+    /// Byte and packet counter width, in bytes (4 or 8)
+    #[arg(long, default_value_t = 8)]
+    counter_width: u8,
+
+    /// Template ID to advertise (must be at least 256)
+    #[arg(long, default_value_t = export::elements::DEFAULT_TEMPLATE_ID)]
+    template_id: u16,
+
+    /// Seconds between template retransmissions
+    #[arg(long, default_value_t = export::elements::DEFAULT_TEMPLATE_INTERVAL_SECS)]
+    template_interval: u64,
 
     /// Enable verbose (debug) logging
     #[arg(short, long)]
@@ -91,7 +107,29 @@ fn main() -> Result<()> {
 }
 
 fn run_worker(args: &Args) -> Result<()> {
+    // Validate the configuration before touching anything on the system, so a
+    // bad flag is reported as a bad flag rather than as whatever fails next.
+    if args.template_interval == 0 {
+        anyhow::bail!("--template-interval must be at least 1 second");
+    }
+    let template = Template::resolve(
+        args.profile,
+        CounterWidth::from_bytes(args.counter_width)?,
+        args.template_id,
+    )
+    .context("Invalid export configuration")?;
+
     info!("Starting conntrack_exporter worker, collector={}", args.collector);
+    info!(
+        "Exporting IPFIX, profile={:?}, counters={}B, record={}B, template id={}, \
+         up to {} records per message",
+        template.profile,
+        template.counter_width.bytes(),
+        template.record_size,
+        template.template_id,
+        template.max_records_per_message(),
+    );
+
     apply_conntrack_sysctl_settings(args)?;
 
     // Consume shutdown signals through a descriptor so they are observed by the
@@ -112,8 +150,8 @@ fn run_worker(args: &Args) -> Result<()> {
     let nl_socket =
         NetlinkSocket::open(args.recv_buf).context("Failed to open netlink socket")?;
 
-    // Create IPFIX encoder
-    let mut encoder = IpfixEncoder::new(args.domain_id);
+    // Create the encoder from the template resolved above
+    let mut encoder = Encoder::new(args.domain_id, template);
 
     // Send initial template
     let mut include_template = true;
@@ -134,13 +172,14 @@ fn run_worker(args: &Args) -> Result<()> {
     let mut prev_truncated_msgs: u64 = 0;
     let mut foreign_msgs: u64 = 0;
     let mut prev_foreign_msgs: u64 = 0;
+    let mut prev_saturated: u64 = 0;
 
     // Receive buffer (64KB)
     let mut recv_buf = vec![0u8; 65536];
 
     info!("Listening for conntrack NAT events...");
 
-    let template_interval = Duration::from_secs(ipfix::constants::TEMPLATE_RETRANSMIT_INTERVAL);
+    let template_interval = Duration::from_secs(args.template_interval);
     let stats_interval = Duration::from_secs(STATS_INTERVAL_SECS);
 
     let mut running = true;
@@ -160,24 +199,34 @@ fn run_worker(args: &Args) -> Result<()> {
             let new_send_errors = send_errors.saturating_sub(prev_send_errors);
             let new_truncated = truncated_msgs.saturating_sub(prev_truncated_msgs);
             let new_foreign = foreign_msgs.saturating_sub(prev_foreign_msgs);
-            if new_nl_drops > 0 || new_send_errors > 0 || new_truncated > 0 || new_foreign > 0 {
+            let saturated = encoder.saturated_counters();
+            let new_saturated = saturated.saturating_sub(prev_saturated);
+            if new_nl_drops > 0
+                || new_send_errors > 0
+                || new_truncated > 0
+                || new_foreign > 0
+                || new_saturated > 0
+            {
                 warn!(
-                    "drops: nl_recv={} udp_send={} truncated={} foreign={} \
-                     (total: nl_recv={} udp_send={} truncated={} foreign={})",
+                    "drops: nl_recv={} udp_send={} truncated={} foreign={} clamped_counters={} \
+                     (total: nl_recv={} udp_send={} truncated={} foreign={} clamped_counters={})",
                     new_nl_drops,
                     new_send_errors,
                     new_truncated,
                     new_foreign,
+                    new_saturated,
                     nl_drops,
                     send_errors,
                     truncated_msgs,
                     foreign_msgs,
+                    saturated,
                 );
             }
             prev_nl_drops = nl_drops;
             prev_send_errors = send_errors;
             prev_truncated_msgs = truncated_msgs;
             prev_foreign_msgs = foreign_msgs;
+            prev_saturated = saturated;
             last_stats_time = now;
         }
 
@@ -326,7 +375,7 @@ fn run_worker(args: &Args) -> Result<()> {
 /// not the send succeeds: retrying immediately would spin, and the next
 /// interval will carry the template again anyway.
 fn flush_message(
-    encoder: &mut IpfixEncoder,
+    encoder: &mut Encoder,
     udp_socket: &UdpSocket,
     send_errors: &mut u64,
     include_template: &mut bool,

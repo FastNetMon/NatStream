@@ -1,7 +1,7 @@
 use std::fmt;
 use std::net::Ipv4Addr;
 
-use crate::ipfix::constants::{NAT44_SESSION_CREATE, NAT44_SESSION_DELETE};
+use crate::export::elements::{NAT44_SESSION_CREATE, NAT44_SESSION_DELETE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NatEventType {
@@ -10,7 +10,9 @@ pub enum NatEventType {
 }
 
 impl NatEventType {
-    pub fn as_ipfix_value(self) -> u8 {
+    /// The natEvent code (RFC 8158), which is the same under IPFIX and
+    /// NetFlow v9.
+    pub fn nat_event_code(self) -> u8 {
         match self {
             NatEventType::Create => NAT44_SESSION_CREATE,
             NatEventType::Delete => NAT44_SESSION_DELETE,
