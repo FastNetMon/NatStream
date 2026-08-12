@@ -148,9 +148,11 @@ fn run_worker(args: &Args) -> Result<()> {
 
         // Report drop stats every 10 seconds
         if now.duration_since(last_stats_time).as_secs() >= STATS_INTERVAL_SECS {
+            // The kernel drop counter is a u32 that wraps, and reads as 0 if
+            // SO_MEMINFO is unavailable, so it is not monotonic in practice.
             let nl_drops = nl_socket.get_drops();
-            let new_nl_drops = nl_drops - prev_nl_drops;
-            let new_send_errors = send_errors - prev_send_errors;
+            let new_nl_drops = nl_drops.saturating_sub(prev_nl_drops);
+            let new_send_errors = send_errors.saturating_sub(prev_send_errors);
             if new_nl_drops > 0 || new_send_errors > 0 {
                 warn!(
                     "drops: nl_recv={} udp_send={} (total: nl_recv={} udp_send={})",

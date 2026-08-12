@@ -133,9 +133,10 @@ impl IpfixEncoder {
         self.buf[self.data_set_offset + 2..self.data_set_offset + 4]
             .copy_from_slice(&data_set_len.to_be_bytes());
 
-        // Update sequence number (cumulative record count)
+        // Update sequence number (cumulative record count). RFC 7011 expects
+        // this counter to wrap at 2^32 rather than to be an error.
         let count = self.record_count;
-        self.sequence_number += count;
+        self.sequence_number = self.sequence_number.wrapping_add(count);
 
         (&self.buf[..self.offset], count)
     }
