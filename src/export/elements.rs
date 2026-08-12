@@ -8,6 +8,26 @@ pub const IPFIX_HEADER_LEN: usize = 16;
 /// Template set ID (RFC 7011 section 3.3.2)
 pub const IPFIX_TEMPLATE_SET_ID: u16 = 2;
 
+// ---- NetFlow v9 (RFC 3954) ----
+
+pub const NETFLOW9_VERSION: u16 = 9;
+pub const NETFLOW9_HEADER_LEN: usize = 20;
+
+/// Template FlowSet ID (RFC 3954 section 5.2)
+pub const NETFLOW9_TEMPLATE_FLOWSET_ID: u16 = 0;
+
+/// "The Exporter SHOULD insert some padding bytes so that the subsequent
+/// FlowSet starts at a 4-byte aligned boundary… the Length field includes the
+/// padding bytes." (RFC 3954 section 5.3)
+pub const NETFLOW9_ALIGNMENT: usize = 4;
+
+/// The two field types where NetFlow v9 diverges from the IPFIX registry.
+///
+/// v9 has no enterprise mechanism, so RFC 5103 reverse elements cannot be
+/// expressed; it has dedicated types for a flow's reverse direction instead.
+pub const V9_OUT_BYTES: u16 = 23;
+pub const V9_OUT_PKTS: u16 = 24;
+
 // ---- Shared between protocols ----
 
 /// Set / FlowSet header size (set ID + length)

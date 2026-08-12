@@ -1,10 +1,10 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::event::ConntrackEvent;
 
 use super::elements::*;
 use super::record::write_record;
-use super::template::Template;
+use super::template::{Protocol, Template, align_up};
 
 #[inline]
 fn put_u16(buf: &mut [u8], offset: &mut usize, value: u16) {
@@ -18,7 +18,11 @@ fn put_u32(buf: &mut [u8], offset: &mut usize, value: u32) {
     *offset += 4;
 }
 
-/// Pre-allocated IPFIX message encoder.
+/// Pre-allocated message encoder for both export protocols.
+///
+/// The data record body is identical under IPFIX and NetFlow v9 — same fields,
+/// same order, same widths — so only the message header and the way a template
+/// is described differ.
 pub struct Encoder {
     buf: [u8; MAX_MSG_SIZE],
     offset: usize,
@@ -30,6 +34,8 @@ pub struct Encoder {
     observation_domain_id: u32,
     template: Template,
     saturated_counters: u64,
+    /// Reference point for NetFlow v9's sysUpTime.
+    started: Instant,
 }
 
 impl Encoder {
@@ -45,7 +51,12 @@ impl Encoder {
             observation_domain_id,
             template,
             saturated_counters: 0,
+            started: Instant::now(),
         }
+    }
+
+    fn protocol(&self) -> Protocol {
+        self.template.protocol
     }
 
     /// How many counter values have been clamped because the configured counter
@@ -66,7 +77,7 @@ impl Encoder {
         self.template_included = include_template;
 
         // Reserve space for the message header (filled in finalize)
-        self.offset = IPFIX_HEADER_LEN;
+        self.offset = self.protocol().header_len();
 
         if include_template {
             self.write_template_set();
@@ -76,13 +87,15 @@ impl Encoder {
     /// Try to add a record to the current message. Returns false if the message
     /// is full and the record was not added.
     pub fn add_record(&mut self, event: &ConntrackEvent) -> bool {
-        // The data set header has to fit too if this is the first record.
+        // The data set header has to fit too if this is the first record, as
+        // does any padding finalize will append to the set.
+        let padding_reserve = self.protocol().set_alignment() - 1;
         let needed = if self.data_set_open {
             self.template.record_size
         } else {
             SET_HEADER_LEN + self.template.record_size
         };
-        if self.offset + needed > MAX_MSG_SIZE {
+        if self.offset + needed + padding_reserve > MAX_MSG_SIZE {
             return false;
         }
 
@@ -122,60 +135,98 @@ impl Encoder {
     /// Finalize the message: fill in the header and the data set length.
     /// Returns the ready-to-send bytes and the number of records.
     pub fn finalize(&mut self) -> (&[u8], u32) {
-        let msg_len = self.offset as u16;
-        let export_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as u32;
-
-        // Fill IPFIX message header
-        // Version (2 bytes)
-        self.buf[0..2].copy_from_slice(&IPFIX_VERSION.to_be_bytes());
-        // Length (2 bytes)
-        self.buf[2..4].copy_from_slice(&msg_len.to_be_bytes());
-        // Export Time (4 bytes)
-        self.buf[4..8].copy_from_slice(&export_time.to_be_bytes());
-        // Sequence Number (4 bytes)
-        self.buf[8..12].copy_from_slice(&self.sequence_number.to_be_bytes());
-        // Observation Domain ID (4 bytes)
-        self.buf[12..16].copy_from_slice(&self.observation_domain_id.to_be_bytes());
-
-        // Fill data set length, if this message has a data set at all
+        // Close the data set: pad it out if the protocol asks for aligned sets,
+        // then patch its length, which includes that padding.
         if self.data_set_open {
+            self.pad_set();
             let data_set_len = (self.offset - self.data_set_offset) as u16;
             self.buf[self.data_set_offset + 2..self.data_set_offset + 4]
                 .copy_from_slice(&data_set_len.to_be_bytes());
         }
 
-        // Update sequence number (cumulative record count). RFC 7011 expects
-        // this counter to wrap at 2^32 rather than to be an error.
+        let unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32;
         let count = self.record_count;
-        self.sequence_number = self.sequence_number.wrapping_add(count);
+
+        let version = self.protocol().version().to_be_bytes();
+        self.buf[0..2].copy_from_slice(&version);
+
+        match self.protocol() {
+            Protocol::Ipfix => {
+                // Length in bytes
+                self.buf[2..4].copy_from_slice(&(self.offset as u16).to_be_bytes());
+                // Export Time
+                self.buf[4..8].copy_from_slice(&unix_secs.to_be_bytes());
+                // Sequence Number: data records exported before this message
+                self.buf[8..12].copy_from_slice(&self.sequence_number.to_be_bytes());
+                // Observation Domain ID
+                self.buf[12..16].copy_from_slice(&self.observation_domain_id.to_be_bytes());
+
+                // RFC 7011 expects this counter to wrap at 2^32.
+                self.sequence_number = self.sequence_number.wrapping_add(count);
+            }
+            Protocol::Netflow9 => {
+                // "The total number of records in the Export Packet, which is
+                // the sum of Options FlowSet records, Template FlowSet records,
+                // and Data FlowSet records" — records, not FlowSets, and there
+                // is no message length field at all.
+                let template_records = u32::from(self.template_included);
+                let record_total = (count + template_records) as u16;
+
+                self.buf[2..4].copy_from_slice(&record_total.to_be_bytes());
+                // sysUpTime, milliseconds since this exporter started. Wraps
+                // after ~49.7 days, which is inherent to the 32-bit field.
+                let uptime_ms = self.started.elapsed().as_millis() as u32;
+                self.buf[4..8].copy_from_slice(&uptime_ms.to_be_bytes());
+                self.buf[8..12].copy_from_slice(&unix_secs.to_be_bytes());
+                // Sequence Number counts exported *packets*, not records.
+                self.buf[12..16].copy_from_slice(&self.sequence_number.to_be_bytes());
+                // Source ID
+                self.buf[16..20].copy_from_slice(&self.observation_domain_id.to_be_bytes());
+
+                self.sequence_number = self.sequence_number.wrapping_add(1);
+            }
+        }
 
         (&self.buf[..self.offset], count)
     }
 
+    /// Zero-fill up to the protocol's set alignment.
+    fn pad_set(&mut self) {
+        let padded = align_up(self.offset, self.protocol().set_alignment());
+        self.buf[self.offset..padded].fill(0);
+        self.offset = padded;
+    }
+
     fn write_template_set(&mut self) {
+        let set_start = self.offset;
+
         let Encoder {
             buf,
             offset,
             template,
             ..
         } = self;
+        let protocol = template.protocol;
 
-        // Set header: set_id=2 (template), length
-        put_u16(buf, offset, IPFIX_TEMPLATE_SET_ID);
+        // Set header: template set / FlowSet ID, then length
+        put_u16(buf, offset, protocol.template_set_id());
         put_u16(buf, offset, template.set_size() as u16);
 
         // Template record header: template_id, field_count
         put_u16(buf, offset, template.template_id);
         put_u16(buf, offset, template.field_count());
 
-        // Field specifiers. Enterprise-specific elements set the enterprise bit
-        // in the IE ID and append the Private Enterprise Number.
+        // Field specifiers. Under IPFIX, enterprise-specific elements set the
+        // enterprise bit and append the Private Enterprise Number; NetFlow v9
+        // has no such mechanism, and resolving the template for it never
+        // produces an enterprise field.
         for field in &template.fields {
             match field.pen {
                 Some(pen) => {
+                    debug_assert!(protocol.supports_enterprise());
                     put_u16(buf, offset, field.id | ENTERPRISE_BIT);
                     put_u16(buf, offset, field.length);
                     put_u32(buf, offset, pen);
@@ -186,6 +237,9 @@ impl Encoder {
                 }
             }
         }
+
+        self.pad_set();
+        debug_assert_eq!(self.offset - set_start, self.template.set_size());
     }
 }
 
@@ -193,11 +247,12 @@ impl Encoder {
 mod tests {
     use super::*;
     use crate::event::NatEventType;
-    use crate::export::template::{CounterWidth, Profile};
+    use crate::export::template::{CounterWidth, Profile, Protocol};
     use std::net::Ipv4Addr;
 
     fn template() -> Template {
-        Template::resolve(Profile::Full, CounterWidth::Eight, DEFAULT_TEMPLATE_ID).unwrap()
+        Template::resolve(Protocol::Ipfix, Profile::Full, CounterWidth::Eight, DEFAULT_TEMPLATE_ID)
+            .unwrap()
     }
 
     fn encoder() -> Encoder {
@@ -464,10 +519,219 @@ mod tests {
         assert_eq!(enc.sequence_number, 1);
     }
 
+    // ---- NetFlow v9 ----
+
+    fn v9_template(profile: Profile, width: CounterWidth) -> Template {
+        Template::resolve(Protocol::Netflow9, profile, width, DEFAULT_TEMPLATE_ID).unwrap()
+    }
+
+    fn v9_encoder() -> Encoder {
+        Encoder::new(0, v9_template(Profile::Full, CounterWidth::Eight))
+    }
+
+    #[test]
+    fn a_netflow9_header_describes_the_packet() {
+        let mut enc = Encoder::new(7, v9_template(Profile::Full, CounterWidth::Eight));
+        enc.begin_message(false);
+        assert!(enc.add_record(&event()));
+        let (msg, count) = enc.finalize();
+
+        assert_eq!(count, 1);
+        assert_eq!(be16(&msg[0..2]), NETFLOW9_VERSION);
+        // v9 has no length field; the datagram length is implicit.
+        assert_eq!(be16(&msg[2..4]), 1, "Count is a record count");
+        assert!(be32(&msg[8..12]) > 0, "unix seconds");
+        assert_eq!(be32(&msg[12..16]), 0, "first packet is sequence 0");
+        assert_eq!(be32(&msg[16..20]), 7, "source id");
+        assert_eq!(msg.len(), NETFLOW9_HEADER_LEN + SET_HEADER_LEN + 58 + 2);
+    }
+
+    #[test]
+    fn the_netflow9_count_totals_template_and_data_records() {
+        let mut enc = v9_encoder();
+
+        // Template alone: one template record.
+        enc.begin_message(true);
+        let (msg, _) = enc.finalize();
+        assert_eq!(be16(&msg[2..4]), 1);
+
+        // Template plus five data records.
+        enc.begin_message(true);
+        for _ in 0..5 {
+            assert!(enc.add_record(&event()));
+        }
+        let (msg, _) = enc.finalize();
+        assert_eq!(be16(&msg[2..4]), 6);
+
+        // Data records alone.
+        enc.begin_message(false);
+        for _ in 0..3 {
+            assert!(enc.add_record(&event()));
+        }
+        let (msg, _) = enc.finalize();
+        assert_eq!(be16(&msg[2..4]), 3);
+    }
+
+    #[test]
+    fn the_netflow9_sequence_number_counts_packets_not_records() {
+        let mut enc = v9_encoder();
+
+        for expected in 0..3u32 {
+            enc.begin_message(false);
+            assert!(enc.add_record(&event()));
+            assert!(enc.add_record(&event()));
+            let (msg, _) = enc.finalize();
+            assert_eq!(be32(&msg[12..16]), expected, "one per exported packet");
+        }
+    }
+
+    #[test]
+    fn netflow9_sys_up_time_advances() {
+        let mut enc = v9_encoder();
+        enc.begin_message(true);
+        let (msg, _) = enc.finalize();
+        let first = be32(&msg[4..8]);
+
+        std::thread::sleep(std::time::Duration::from_millis(15));
+
+        enc.begin_message(true);
+        let (msg, _) = enc.finalize();
+        assert!(be32(&msg[4..8]) > first, "sysUpTime must advance");
+    }
+
+    #[test]
+    fn a_netflow9_template_uses_flowset_zero_and_plain_specifiers() {
+        let mut enc = v9_encoder();
+        enc.begin_message(true);
+        let fields = enc.template.fields.clone();
+        let set_size = enc.template.set_size();
+        let (msg, _) = enc.finalize();
+
+        assert_eq!(be16(&msg[20..22]), NETFLOW9_TEMPLATE_FLOWSET_ID);
+        assert_eq!(be16(&msg[22..24]) as usize, set_size);
+        assert_eq!(be16(&msg[24..26]), DEFAULT_TEMPLATE_ID);
+        assert_eq!(be16(&msg[26..28]), 14);
+
+        // Specifiers are a flat (type, length) pair: stride is always 4 and no
+        // enterprise bit is ever set.
+        let mut offset = NETFLOW9_HEADER_LEN + SET_HEADER_LEN + 4;
+        for field in &fields {
+            assert!(field.pen.is_none(), "v9 cannot express enterprise elements");
+            assert_eq!(be16(&msg[offset..]), field.id);
+            assert_eq!(be16(&msg[offset..]) & ENTERPRISE_BIT, 0);
+            assert_eq!(be16(&msg[offset + 2..]), field.length);
+            offset += FIELD_SPECIFIER_LEN;
+        }
+        assert_eq!(offset, msg.len());
+    }
+
+    #[test]
+    fn netflow9_maps_the_reply_counters_onto_out_bytes_and_packets() {
+        let template = v9_template(Profile::Full, CounterWidth::Eight);
+        let ids: Vec<u16> = template.fields.iter().map(|f| f.id).collect();
+
+        // The forward counters keep IN_BYTES/IN_PKTS, and the reply direction
+        // becomes OUT_BYTES/OUT_PKTS rather than an enterprise reverse element.
+        assert_eq!(&ids[10..14], &[1, 2, V9_OUT_BYTES, V9_OUT_PKTS]);
+    }
+
+    #[test]
+    fn netflow9_pads_data_flowsets_to_a_four_byte_boundary() {
+        // 58-byte records leave an odd FlowSet length for odd record counts.
+        for records in 1..=4 {
+            let mut enc = v9_encoder();
+            enc.begin_message(false);
+            for _ in 0..records {
+                assert!(enc.add_record(&event()));
+            }
+            let (msg, count) = enc.finalize();
+            assert_eq!(count, records);
+
+            let flowset_len = be16(&msg[22..24]) as usize;
+            assert_eq!(
+                flowset_len % NETFLOW9_ALIGNMENT,
+                0,
+                "FlowSet length must be 4-byte aligned"
+            );
+            assert_eq!(
+                flowset_len,
+                SET_HEADER_LEN + records as usize * 58 + (records as usize % 2) * 2,
+                "length includes the padding"
+            );
+            assert_eq!(msg.len(), NETFLOW9_HEADER_LEN + flowset_len);
+        }
+    }
+
+    #[test]
+    fn a_netflow9_template_only_packet_carries_no_data_flowset() {
+        let mut enc = v9_encoder();
+        enc.begin_message(true);
+        let set_size = enc.template.set_size();
+        let (msg, count) = enc.finalize();
+
+        assert_eq!(count, 0);
+        assert_eq!(msg.len(), NETFLOW9_HEADER_LEN + set_size);
+        assert_eq!(msg.len(), 84, "20-byte header plus a 64-byte template");
+    }
+
+    #[test]
+    fn every_configuration_agrees_with_the_template_it_advertises() {
+        for protocol in [Protocol::Ipfix, Protocol::Netflow9] {
+            for profile in [Profile::Full, Profile::NatSource, Profile::FlowOnly] {
+                for width in [CounterWidth::Four, CounterWidth::Eight] {
+                    let template =
+                        Template::resolve(protocol, profile, width, DEFAULT_TEMPLATE_ID).unwrap();
+                    let declared: usize =
+                        template.fields.iter().map(|f| f.length as usize).sum();
+                    assert_eq!(declared, template.record_size);
+
+                    let label = format!("{protocol:?}/{profile:?}/{width:?}");
+                    let header_len = protocol.header_len();
+                    let mut enc = Encoder::new(0, template.clone());
+
+                    // One record must occupy exactly the advertised size.
+                    enc.begin_message(false);
+                    assert!(enc.add_record(&event()), "{label}: first record rejected");
+                    let (msg, _) = enc.finalize();
+                    let padding = if protocol == Protocol::Netflow9 {
+                        align_up(SET_HEADER_LEN + template.record_size, NETFLOW9_ALIGNMENT)
+                            - SET_HEADER_LEN
+                            - template.record_size
+                    } else {
+                        0
+                    };
+                    assert_eq!(
+                        msg.len(),
+                        header_len + SET_HEADER_LEN + template.record_size + padding,
+                        "{label}: message size"
+                    );
+
+                    // A full message must stay inside the MTU budget, and the
+                    // reported capacity must be achievable with the template.
+                    enc.begin_message(true);
+                    let mut accepted = 0;
+                    while enc.add_record(&event()) {
+                        accepted += 1;
+                    }
+                    let (msg, count) = enc.finalize();
+                    assert_eq!(count, accepted);
+                    assert!(accepted > 0, "{label}: no records fit");
+                    assert!(msg.len() <= MAX_MSG_SIZE, "{label}: {} bytes", msg.len());
+                    assert_eq!(
+                        accepted as usize,
+                        template.max_records_per_message(),
+                        "{label}: reported capacity"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn narrow_counters_clamp_instead_of_truncating() {
         let template =
-            Template::resolve(Profile::Full, CounterWidth::Four, DEFAULT_TEMPLATE_ID).unwrap();
+            Template::resolve(Protocol::Ipfix, Profile::Full, CounterWidth::Four, DEFAULT_TEMPLATE_ID)
+                .unwrap();
         let mut enc = Encoder::new(0, template);
         enc.begin_message(false);
 

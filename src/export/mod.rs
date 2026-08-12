@@ -4,4 +4,4 @@ pub mod record;
 pub mod template;
 
 pub use encoder::Encoder;
-pub use template::{CounterWidth, Profile, Template};
+pub use template::{CounterWidth, Profile, Protocol, Template};

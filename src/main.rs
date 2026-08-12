@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use log::{debug, error, info, warn};
 
-use export::{CounterWidth, Encoder, Profile, Template};
+use export::{CounterWidth, Encoder, Profile, Protocol, Template};
 use netlink::constants::{DEFAULT_RECV_BUF_SIZE, DEFAULT_SEND_BUF_SIZE};
 use netlink::{parse_conntrack_messages, NetlinkSocket};
 use signals::SignalFd;
@@ -39,9 +39,9 @@ const CONNTRACK_ACCT_SYSCTL: &str = "/proc/sys/net/netfilter/nf_conntrack_acct";
 const CONNTRACK_EVENTS_SYSCTL: &str = "/proc/sys/net/netfilter/nf_conntrack_events";
 
 #[derive(Parser, Debug)]
-#[command(name = "conntrack_exporter", about = "Conntrack NAT event IPFIX exporter")]
+#[command(name = "conntrack_exporter", about = "Conntrack NAT event IPFIX / NetFlow v9 exporter")]
 struct Args {
-    /// IPFIX collector address (ip:port)
+    /// Flow collector address (ip:port)
     #[arg(short, long)]
     collector: SocketAddr,
 
@@ -56,6 +56,10 @@ struct Args {
     /// Observation domain ID
     #[arg(long, default_value_t = 0)]
     domain_id: u32,
+
+    /// Export protocol to speak
+    #[arg(long, value_enum, default_value_t = Protocol::Ipfix)]
+    protocol: Protocol,
 
     /// Which field set to export
     #[arg(long, value_enum, default_value_t = Profile::Full)]
@@ -113,6 +117,7 @@ fn run_worker(args: &Args) -> Result<()> {
         anyhow::bail!("--template-interval must be at least 1 second");
     }
     let template = Template::resolve(
+        args.protocol,
         args.profile,
         CounterWidth::from_bytes(args.counter_width)?,
         args.template_id,
@@ -121,8 +126,9 @@ fn run_worker(args: &Args) -> Result<()> {
 
     info!("Starting conntrack_exporter worker, collector={}", args.collector);
     info!(
-        "Exporting IPFIX, profile={:?}, counters={}B, record={}B, template id={}, \
+        "Exporting {:?}, profile={:?}, counters={}B, record={}B, template id={}, \
          up to {} records per message",
+        template.protocol,
         template.profile,
         template.counter_width.bytes(),
         template.record_size,
@@ -137,7 +143,7 @@ fn run_worker(args: &Args) -> Result<()> {
     let signals = SignalFd::new(&[libc::SIGTERM, libc::SIGINT])
         .context("Failed to set up signal handling")?;
 
-    // Create UDP socket for IPFIX export
+    // Create UDP socket for flow export
     let udp_socket = UdpSocket::bind("0.0.0.0:0").context("Failed to bind UDP socket")?;
     udp_socket
         .connect(args.collector)
@@ -330,7 +336,7 @@ fn run_worker(args: &Args) -> Result<()> {
             message_active = true;
         }
 
-        // Parse all conntrack messages and encode into IPFIX
+        // Parse all conntrack messages and encode them
         parse_conntrack_messages(&recv_buf[..datagram.len], |event| {
             debug!("{}", event);
 
@@ -369,7 +375,7 @@ fn run_worker(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// Send the buffered IPFIX message, if it holds anything worth sending.
+/// Send the buffered message, if it holds anything worth sending.
 ///
 /// A message carrying the template settles the retransmit schedule whether or
 /// not the send succeeds: retrying immediately would spin, and the next
@@ -393,7 +399,7 @@ fn flush_message(
 
     let (data, count) = encoder.finalize();
     match udp_socket.send(data) {
-        Ok(_) => debug!("Sent IPFIX message with {} records ({})", count, reason),
+        Ok(_) => debug!("Sent message with {} records ({})", count, reason),
         Err(e) => {
             *send_errors += 1;
             warn!("sendto() failed: {}", e);

@@ -167,6 +167,71 @@ const _: () = assert!(shapes_are_consistent(PROFILE_FULL));
 const _: () = assert!(shapes_are_consistent(PROFILE_NAT_SOURCE));
 const _: () = assert!(shapes_are_consistent(PROFILE_FLOW_ONLY));
 
+/// Which export protocol to speak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Protocol {
+    /// IPFIX, RFC 7011.
+    Ipfix,
+    /// NetFlow v9, RFC 3954.
+    Netflow9,
+}
+
+impl Protocol {
+    pub const fn version(self) -> u16 {
+        match self {
+            Protocol::Ipfix => IPFIX_VERSION,
+            Protocol::Netflow9 => NETFLOW9_VERSION,
+        }
+    }
+
+    pub const fn header_len(self) -> usize {
+        match self {
+            Protocol::Ipfix => IPFIX_HEADER_LEN,
+            Protocol::Netflow9 => NETFLOW9_HEADER_LEN,
+        }
+    }
+
+    /// The set / FlowSet ID that introduces a template.
+    pub const fn template_set_id(self) -> u16 {
+        match self {
+            Protocol::Ipfix => IPFIX_TEMPLATE_SET_ID,
+            Protocol::Netflow9 => NETFLOW9_TEMPLATE_FLOWSET_ID,
+        }
+    }
+
+    /// Whether enterprise-specific Information Elements can be expressed.
+    /// NetFlow v9 field specifiers are a flat (type, length) pair.
+    pub const fn supports_enterprise(self) -> bool {
+        matches!(self, Protocol::Ipfix)
+    }
+
+    /// Byte boundary that sets are padded to, if the protocol asks for it.
+    pub const fn set_alignment(self) -> usize {
+        match self {
+            Protocol::Ipfix => 1,
+            Protocol::Netflow9 => NETFLOW9_ALIGNMENT,
+        }
+    }
+}
+
+/// The NetFlow v9 field type for a source.
+///
+/// v9 has no enterprise mechanism, so the RFC 5103 reverse counters that IPFIX
+/// carries as IE 1/2 + PEN 29305 map onto the dedicated OUT_BYTES/OUT_PKTS
+/// types instead.
+///
+/// Take care here: 23/24 are *correct* under v9 and *wrong* under IPFIX, where
+/// the same numbers mean postOctetDeltaCount/postPacketDeltaCount — the forward
+/// direction as modified by a middlebox, not the reverse direction. Same
+/// numbers, opposite meaning; do not "unify" these.
+const fn netflow9_type(source: FieldSource, ipfix_id: u16) -> u16 {
+    match source {
+        FieldSource::ReplyBytes => V9_OUT_BYTES,
+        FieldSource::ReplyPackets => V9_OUT_PKTS,
+        _ => ipfix_id,
+    }
+}
+
 /// Which field set to export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Profile {
@@ -230,12 +295,23 @@ pub struct Template {
     pub fields: Vec<ResolvedField>,
     pub record_size: usize,
     pub template_id: u16,
+    pub protocol: Protocol,
     pub profile: Profile,
     pub counter_width: CounterWidth,
 }
 
+/// Round up to the next multiple of `alignment`.
+pub const fn align_up(value: usize, alignment: usize) -> usize {
+    value.div_ceil(alignment) * alignment
+}
+
 impl Template {
-    pub fn resolve(profile: Profile, counter_width: CounterWidth, template_id: u16) -> Result<Self> {
+    pub fn resolve(
+        protocol: Protocol,
+        profile: Profile,
+        counter_width: CounterWidth,
+        template_id: u16,
+    ) -> Result<Self> {
         if template_id < MIN_TEMPLATE_ID {
             bail!("template ID must be at least {MIN_TEMPLATE_ID}, got {template_id}");
         }
@@ -243,16 +319,27 @@ impl Template {
         let fields: Vec<ResolvedField> = profile
             .shapes()
             .iter()
-            .map(|shape| ResolvedField {
-                id: shape.ipfix.id,
-                pen: shape.ipfix.pen,
-                length: match shape.width {
-                    Width::Fixed(n) => n,
-                    Width::Counter => counter_width.bytes(),
-                },
-                source: shape.source,
+            .map(|shape| {
+                let (id, pen) = match protocol {
+                    Protocol::Ipfix => (shape.ipfix.id, shape.ipfix.pen),
+                    Protocol::Netflow9 => (netflow9_type(shape.source, shape.ipfix.id), None),
+                };
+                ResolvedField {
+                    id,
+                    pen,
+                    length: match shape.width {
+                        Width::Fixed(n) => n,
+                        Width::Counter => counter_width.bytes(),
+                    },
+                    source: shape.source,
+                }
             })
             .collect();
+
+        debug_assert!(
+            protocol.supports_enterprise() || fields.iter().all(|f| f.pen.is_none()),
+            "enterprise elements cannot be expressed under this protocol"
+        );
 
         let record_size = fields.iter().map(|f| f.length as usize).sum();
 
@@ -260,13 +347,16 @@ impl Template {
             fields,
             record_size,
             template_id,
+            protocol,
             profile,
             counter_width,
         };
 
         // A message that cannot hold its own template plus one record would
         // never make progress.
-        let smallest_useful = IPFIX_HEADER_LEN + template.set_size() + SET_HEADER_LEN + record_size;
+        let smallest_useful = protocol.header_len()
+            + template.set_size()
+            + template.data_set_size(1);
         if smallest_useful > MAX_MSG_SIZE {
             bail!(
                 "a {record_size}-byte record with a {}-byte template does not fit \
@@ -279,7 +369,7 @@ impl Template {
     }
 
     /// Size of the encoded template set: set header, template record header,
-    /// then one specifier per field.
+    /// then one specifier per field, padded if the protocol asks for it.
     pub fn set_size(&self) -> usize {
         let specifiers: usize = self
             .fields
@@ -289,7 +379,18 @@ impl Template {
                 None => FIELD_SPECIFIER_LEN,
             })
             .sum();
-        SET_HEADER_LEN + 4 + specifiers
+        align_up(
+            SET_HEADER_LEN + 4 + specifiers,
+            self.protocol.set_alignment(),
+        )
+    }
+
+    /// Size of a data set holding `records` records, including any padding.
+    pub fn data_set_size(&self, records: usize) -> usize {
+        align_up(
+            SET_HEADER_LEN + records * self.record_size,
+            self.protocol.set_alignment(),
+        )
     }
 
     pub fn field_count(&self) -> u16 {
@@ -299,8 +400,11 @@ impl Template {
     /// Records that fit in a message that also carries the template — the
     /// worst case, and so the figure worth reporting.
     pub fn max_records_per_message(&self) -> usize {
-        let available =
-            MAX_MSG_SIZE - IPFIX_HEADER_LEN - self.set_size() - SET_HEADER_LEN;
-        available / self.record_size
+        let budget = MAX_MSG_SIZE - self.protocol.header_len() - self.set_size();
+        let mut records = 0;
+        while self.data_set_size(records + 1) <= budget {
+            records += 1;
+        }
+        records
     }
 }
