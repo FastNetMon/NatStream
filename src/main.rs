@@ -130,6 +130,10 @@ fn run_worker(args: &Args) -> Result<()> {
     let mut prev_nl_drops: u64 = nl_socket.get_drops();
     let mut send_errors: u64 = 0;
     let mut prev_send_errors: u64 = 0;
+    let mut truncated_msgs: u64 = 0;
+    let mut prev_truncated_msgs: u64 = 0;
+    let mut foreign_msgs: u64 = 0;
+    let mut prev_foreign_msgs: u64 = 0;
 
     // Receive buffer (64KB)
     let mut recv_buf = vec![0u8; 65536];
@@ -153,14 +157,26 @@ fn run_worker(args: &Args) -> Result<()> {
             let nl_drops = nl_socket.get_drops();
             let new_nl_drops = nl_drops.saturating_sub(prev_nl_drops);
             let new_send_errors = send_errors.saturating_sub(prev_send_errors);
-            if new_nl_drops > 0 || new_send_errors > 0 {
+            let new_truncated = truncated_msgs.saturating_sub(prev_truncated_msgs);
+            let new_foreign = foreign_msgs.saturating_sub(prev_foreign_msgs);
+            if new_nl_drops > 0 || new_send_errors > 0 || new_truncated > 0 || new_foreign > 0 {
                 warn!(
-                    "drops: nl_recv={} udp_send={} (total: nl_recv={} udp_send={})",
-                    new_nl_drops, new_send_errors, nl_drops, send_errors,
+                    "drops: nl_recv={} udp_send={} truncated={} foreign={} \
+                     (total: nl_recv={} udp_send={} truncated={} foreign={})",
+                    new_nl_drops,
+                    new_send_errors,
+                    new_truncated,
+                    new_foreign,
+                    nl_drops,
+                    send_errors,
+                    truncated_msgs,
+                    foreign_msgs,
                 );
             }
             prev_nl_drops = nl_drops;
             prev_send_errors = send_errors;
+            prev_truncated_msgs = truncated_msgs;
+            prev_foreign_msgs = foreign_msgs;
             last_stats_time = now;
         }
 
@@ -201,8 +217,8 @@ fn run_worker(args: &Args) -> Result<()> {
         }
 
         // Receive netlink messages
-        let n = match nl_socket.recv(&mut recv_buf) {
-            Ok(n) => n,
+        let datagram = match nl_socket.recv(&mut recv_buf) {
+            Ok(datagram) => datagram,
             Err(e) => {
                 if e.kind() == io::ErrorKind::Interrupted {
                     continue;
@@ -212,7 +228,21 @@ fn run_worker(args: &Args) -> Result<()> {
             }
         };
 
-        if n == 0 {
+        // Conntrack notifications originate in the kernel, which uses port ID 0.
+        if datagram.sender_portid != 0 {
+            foreign_msgs += 1;
+            continue;
+        }
+
+        if datagram.datagram_len > datagram.len {
+            truncated_msgs += 1;
+            warn!(
+                "netlink datagram truncated: kept {} of {} bytes",
+                datagram.len, datagram.datagram_len
+            );
+        }
+
+        if datagram.len == 0 {
             continue;
         }
 
@@ -227,7 +257,7 @@ fn run_worker(args: &Args) -> Result<()> {
         }
 
         // Parse all conntrack messages and encode into IPFIX
-        parse_conntrack_messages(&recv_buf, n, |event| {
+        parse_conntrack_messages(&recv_buf[..datagram.len], |event| {
             debug!("{}", event);
 
             if !encoder.add_record(&event) {

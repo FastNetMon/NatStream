@@ -8,10 +8,11 @@ use super::constants::*;
 
 /// Parse all conntrack messages from a netlink recv buffer.
 /// Calls the callback for each valid NAT event found.
-pub fn parse_conntrack_messages<F>(buf: &[u8], len: usize, mut callback: F)
+pub fn parse_conntrack_messages<F>(buf: &[u8], mut callback: F)
 where
     F: FnMut(ConntrackEvent),
 {
+    let len = buf.len();
     let mut offset = 0;
 
     while offset + NLMSG_HDRLEN <= len {

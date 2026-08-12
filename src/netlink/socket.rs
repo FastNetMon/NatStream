@@ -10,6 +10,17 @@ pub struct NetlinkSocket {
     fd: RawFd,
 }
 
+/// One datagram read from the netlink socket.
+pub struct Datagram {
+    /// Bytes actually available in the caller's buffer.
+    pub len: usize,
+    /// The datagram's full length as reported by the kernel. Greater than
+    /// `len` when the buffer was too small and the remainder was discarded.
+    pub datagram_len: usize,
+    /// Netlink port ID of the sender. Kernel-originated messages use 0.
+    pub sender_portid: u32,
+}
+
 impl NetlinkSocket {
     pub fn open(recv_buf_size: usize) -> Result<Self> {
         let fd = unsafe {
@@ -120,20 +131,34 @@ impl NetlinkSocket {
         Ok(())
     }
 
-    /// Receive data into the provided buffer. Returns the number of bytes read.
-    pub fn recv(&self, buf: &mut [u8]) -> Result<usize, io::Error> {
+    /// Receive one netlink datagram into the provided buffer.
+    pub fn recv(&self, buf: &mut [u8]) -> Result<Datagram, io::Error> {
+        let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        let mut addr_len = std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+
+        // MSG_TRUNC makes the return value the datagram's real length even when
+        // it did not fit, so an oversized message can be reported rather than
+        // silently losing its tail.
         let n = unsafe {
-            libc::recv(
+            libc::recvfrom(
                 self.fd,
                 buf.as_mut_ptr() as *mut libc::c_void,
                 buf.len(),
-                0,
+                libc::MSG_TRUNC,
+                &mut addr as *mut libc::sockaddr_nl as *mut libc::sockaddr,
+                &mut addr_len,
             )
         };
         if n < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(n as usize)
+
+        let datagram_len = n as usize;
+        Ok(Datagram {
+            len: datagram_len.min(buf.len()),
+            datagram_len,
+            sender_portid: addr.nl_pid,
+        })
     }
 
     /// Get the cumulative number of drops on this socket via SO_MEMINFO.
