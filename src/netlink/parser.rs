@@ -297,3 +297,300 @@ fn read_u64_be(data: &[u8]) -> u64 {
 fn nla_align(len: usize) -> usize {
     (len + NLA_ALIGNTO - 1) & !(NLA_ALIGNTO - 1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NLA_F_NESTED: u16 = 0x8000;
+
+    /// Build one netlink attribute, padded to the alignment boundary.
+    fn attr(nla_type: u16, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&((NLA_HDRLEN + payload.len()) as u16).to_ne_bytes());
+        out.extend_from_slice(&nla_type.to_ne_bytes());
+        out.extend_from_slice(payload);
+        while out.len() % NLA_ALIGNTO != 0 {
+            out.push(0);
+        }
+        out
+    }
+
+    /// Build a nested attribute. The nested flag exercises NLA_TYPE_MASK.
+    fn nested(nla_type: u16, children: &[Vec<u8>]) -> Vec<u8> {
+        attr(nla_type | NLA_F_NESTED, &children.concat())
+    }
+
+    fn tuple(nla_type: u16, src: [u8; 4], dst: [u8; 4], proto: u8, sport: u16, dport: u16) -> Vec<u8> {
+        nested(
+            nla_type,
+            &[
+                nested(
+                    CTA_TUPLE_IP,
+                    &[attr(CTA_IP_V4_SRC, &src), attr(CTA_IP_V4_DST, &dst)],
+                ),
+                nested(
+                    CTA_TUPLE_PROTO,
+                    &[
+                        attr(CTA_PROTO_NUM, &[proto]),
+                        attr(CTA_PROTO_SRC_PORT, &sport.to_be_bytes()),
+                        attr(CTA_PROTO_DST_PORT, &dport.to_be_bytes()),
+                    ],
+                ),
+            ],
+        )
+    }
+
+    fn counters(nla_type: u16, packets: u64, bytes: u64) -> Vec<u8> {
+        nested(
+            nla_type,
+            &[
+                attr(CTA_COUNTERS_PACKETS, &packets.to_be_bytes()),
+                attr(CTA_COUNTERS_BYTES, &bytes.to_be_bytes()),
+            ],
+        )
+    }
+
+    /// Wrap attributes in an nlmsghdr + nfgenmsg, as the kernel delivers them.
+    fn message(nlmsg_type: u16, family: u8, attrs: &[Vec<u8>]) -> Vec<u8> {
+        let mut body = vec![family, 0, 0, 0]; // nfgen_family, version, res_id
+        body.extend_from_slice(&attrs.concat());
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&((NLMSG_HDRLEN + body.len()) as u32).to_ne_bytes());
+        out.extend_from_slice(&nlmsg_type.to_ne_bytes());
+        out.extend_from_slice(&0u16.to_ne_bytes()); // flags
+        out.extend_from_slice(&0u32.to_ne_bytes()); // seq
+        out.extend_from_slice(&0u32.to_ne_bytes()); // pid
+        out.extend_from_slice(&body);
+        while out.len() % NLA_ALIGNTO != 0 {
+            out.push(0);
+        }
+        out
+    }
+
+    fn ct_event(msg_type: u8, family: u8, attrs: &[Vec<u8>]) -> Vec<u8> {
+        message((NFNL_SUBSYS_CTNETLINK << 8) | msg_type as u16, family, attrs)
+    }
+
+    fn parse(buf: &[u8]) -> Vec<ConntrackEvent> {
+        let mut events = Vec::new();
+        parse_conntrack_messages(buf, |event| events.push(event));
+        events
+    }
+
+    /// SNAT: 192.168.1.10:1234 -> 8.8.8.8:53, source rewritten to 203.0.113.5:40000.
+    fn snat_event() -> Vec<u8> {
+        ct_event(
+            IPCTNL_MSG_CT_NEW,
+            libc::AF_INET as u8,
+            &[
+                tuple(CTA_TUPLE_ORIG, [192, 168, 1, 10], [8, 8, 8, 8], 6, 1234, 53),
+                tuple(CTA_TUPLE_REPLY, [8, 8, 8, 8], [203, 0, 113, 5], 6, 53, 40000),
+                attr(CTA_STATUS, &IPS_SRC_NAT.to_be_bytes()),
+                counters(CTA_COUNTERS_ORIG, 7, 700),
+                counters(CTA_COUNTERS_REPLY, 9, 900),
+            ],
+        )
+    }
+
+    #[test]
+    fn snat_event_reports_the_translated_source() {
+        let events = parse(&snat_event());
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+
+        assert_eq!(e.nat_event, NatEventType::Create);
+        assert_eq!(e.protocol, 6);
+        assert_eq!(e.src_ip, Ipv4Addr::new(192, 168, 1, 10));
+        assert_eq!(e.src_port, 1234);
+        assert_eq!(e.dst_ip, Ipv4Addr::new(8, 8, 8, 8));
+        assert_eq!(e.dst_port, 53);
+
+        // The reply tuple's destination is what the source was rewritten to.
+        assert_eq!(e.post_nat_src_ip, Ipv4Addr::new(203, 0, 113, 5));
+        assert_eq!(e.post_nat_src_port, 40000);
+        // The destination was not translated, so it is unchanged.
+        assert_eq!(e.post_nat_dst_ip, Ipv4Addr::new(8, 8, 8, 8));
+        assert_eq!(e.post_nat_dst_port, 53);
+
+        assert_eq!(e.orig_packets, 7);
+        assert_eq!(e.orig_bytes, 700);
+        assert_eq!(e.reply_packets, 9);
+        assert_eq!(e.reply_bytes, 900);
+    }
+
+    #[test]
+    fn dnat_event_reports_the_translated_destination() {
+        // 10.0.0.1:5000 -> 203.0.113.1:80, destination rewritten to 10.0.0.99:8080.
+        let buf = ct_event(
+            IPCTNL_MSG_CT_NEW,
+            libc::AF_INET as u8,
+            &[
+                tuple(CTA_TUPLE_ORIG, [10, 0, 0, 1], [203, 0, 113, 1], 6, 5000, 80),
+                tuple(CTA_TUPLE_REPLY, [10, 0, 0, 99], [10, 0, 0, 1], 6, 8080, 5000),
+                attr(CTA_STATUS, &IPS_DST_NAT.to_be_bytes()),
+            ],
+        );
+
+        let events = parse(&buf);
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+
+        assert_eq!(e.post_nat_dst_ip, Ipv4Addr::new(10, 0, 0, 99));
+        assert_eq!(e.post_nat_dst_port, 8080);
+        // The source was not translated, so it is reported unchanged rather
+        // than being confused with the rewritten destination.
+        assert_eq!(e.post_nat_src_ip, Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(e.post_nat_src_port, 5000);
+    }
+
+    #[test]
+    fn delete_message_yields_a_delete_event() {
+        let buf = ct_event(
+            IPCTNL_MSG_CT_DELETE,
+            libc::AF_INET as u8,
+            &[
+                tuple(CTA_TUPLE_ORIG, [192, 168, 1, 10], [8, 8, 8, 8], 17, 1234, 53),
+                tuple(CTA_TUPLE_REPLY, [8, 8, 8, 8], [203, 0, 113, 5], 17, 53, 40000),
+                attr(CTA_STATUS, &IPS_SRC_NAT.to_be_bytes()),
+            ],
+        );
+
+        let events = parse(&buf);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].nat_event, NatEventType::Delete);
+    }
+
+    #[test]
+    fn events_without_nat_status_are_filtered() {
+        let buf = ct_event(
+            IPCTNL_MSG_CT_NEW,
+            libc::AF_INET as u8,
+            &[
+                tuple(CTA_TUPLE_ORIG, [10, 0, 0, 1], [10, 0, 0, 2], 6, 1000, 2000),
+                tuple(CTA_TUPLE_REPLY, [10, 0, 0, 2], [10, 0, 0, 1], 6, 2000, 1000),
+                attr(CTA_STATUS, &0x0000_0188u32.to_be_bytes()),
+            ],
+        );
+
+        assert!(parse(&buf).is_empty());
+    }
+
+    #[test]
+    fn events_missing_status_are_filtered() {
+        let buf = ct_event(
+            IPCTNL_MSG_CT_NEW,
+            libc::AF_INET as u8,
+            &[tuple(CTA_TUPLE_ORIG, [10, 0, 0, 1], [10, 0, 0, 2], 6, 1000, 2000)],
+        );
+
+        assert!(parse(&buf).is_empty());
+    }
+
+    #[test]
+    fn netlink_control_messages_are_not_events() {
+        // NLMSG_ERROR is 0x2, the same low byte as IPCTNL_MSG_CT_DELETE. Without
+        // a subsystem check this parses as a NAT session teardown.
+        let buf = message(
+            0x2,
+            libc::AF_INET as u8,
+            &[
+                tuple(CTA_TUPLE_ORIG, [10, 0, 0, 1], [10, 0, 0, 2], 6, 1000, 2000),
+                tuple(CTA_TUPLE_REPLY, [10, 0, 0, 2], [203, 0, 113, 9], 6, 2000, 1000),
+                attr(CTA_STATUS, &IPS_SRC_NAT.to_be_bytes()),
+            ],
+        );
+
+        assert!(parse(&buf).is_empty());
+    }
+
+    #[test]
+    fn other_nfnetlink_subsystems_are_ignored() {
+        // Subsystem 2 is the expectation table; its message type 0 would
+        // otherwise look like IPCTNL_MSG_CT_NEW.
+        let subsys_ctnetlink_exp: u16 = 2;
+        let exp_msg_new: u16 = 0;
+        let buf = message(
+            (subsys_ctnetlink_exp << 8) | exp_msg_new,
+            libc::AF_INET as u8,
+            &[
+                tuple(CTA_TUPLE_ORIG, [10, 0, 0, 1], [10, 0, 0, 2], 6, 1000, 2000),
+                attr(CTA_STATUS, &IPS_SRC_NAT.to_be_bytes()),
+            ],
+        );
+
+        assert!(parse(&buf).is_empty());
+    }
+
+    #[test]
+    fn non_ipv4_events_are_skipped() {
+        let buf = ct_event(
+            IPCTNL_MSG_CT_NEW,
+            libc::AF_INET6 as u8,
+            &[attr(CTA_STATUS, &IPS_SRC_NAT.to_be_bytes())],
+        );
+
+        assert!(parse(&buf).is_empty());
+    }
+
+    #[test]
+    fn several_messages_in_one_datagram_are_all_parsed() {
+        let mut buf = snat_event();
+        buf.extend_from_slice(&snat_event());
+        buf.extend_from_slice(&snat_event());
+
+        assert_eq!(parse(&buf).len(), 3);
+    }
+
+    #[test]
+    fn a_truncated_datagram_yields_only_whole_messages() {
+        let mut buf = snat_event();
+        let whole = buf.len();
+        buf.extend_from_slice(&snat_event());
+        buf.truncate(whole + 24); // second message cut mid-attribute
+
+        assert_eq!(parse(&buf).len(), 1);
+    }
+
+    #[test]
+    fn malformed_input_does_not_panic() {
+        // Every prefix of a valid datagram, plus some obvious garbage.
+        let valid = snat_event();
+        for len in 0..valid.len() {
+            parse(&valid[..len]);
+        }
+        parse(&[0xFF; 64]);
+        parse(&[0x00; 64]);
+
+        // A message claiming a length shorter than its own header must not
+        // send the parser backwards or into a loop.
+        let mut short = snat_event();
+        short[0..4].copy_from_slice(&4u32.to_ne_bytes());
+        parse(&short);
+    }
+
+    #[test]
+    fn attributes_with_short_payloads_are_ignored() {
+        let buf = ct_event(
+            IPCTNL_MSG_CT_NEW,
+            libc::AF_INET as u8,
+            &[
+                nested(
+                    CTA_TUPLE_ORIG,
+                    &[nested(
+                        CTA_TUPLE_IP,
+                        &[attr(CTA_IP_V4_SRC, &[10, 0]), attr(CTA_IP_V4_DST, &[10, 0, 0, 2])],
+                    )],
+                ),
+                attr(CTA_STATUS, &IPS_SRC_NAT.to_be_bytes()),
+            ],
+        );
+
+        let events = parse(&buf);
+        assert_eq!(events.len(), 1);
+        // The truncated source address is left at its default, not read past.
+        assert_eq!(events[0].src_ip, Ipv4Addr::UNSPECIFIED);
+        assert_eq!(events[0].dst_ip, Ipv4Addr::new(10, 0, 0, 2));
+    }
+}
