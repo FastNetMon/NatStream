@@ -1,12 +1,12 @@
 mod event;
 mod ipfix;
 mod netlink;
+mod signals;
 
 use std::io;
 use std::ffi::CString;
 use std::fs;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Instant;
 use std::time::Duration;
@@ -18,9 +18,11 @@ use log::{debug, error, info, warn};
 use ipfix::IpfixEncoder;
 use netlink::constants::{DEFAULT_RECV_BUF_SIZE, DEFAULT_SEND_BUF_SIZE};
 use netlink::{parse_conntrack_messages, NetlinkSocket};
+use signals::SignalFd;
 
-static RUNNING: AtomicBool = AtomicBool::new(true);
-static SUPERVISOR_RUNNING: AtomicBool = AtomicBool::new(true);
+/// How long the supervisor waits for the worker to exit on its own after
+/// SIGTERM before escalating to SIGKILL.
+const WORKER_STOP_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Parser, Debug)]
 #[command(name = "conntrack_exporter", about = "Conntrack NAT event IPFIX exporter")]
@@ -67,16 +69,13 @@ fn main() -> Result<()> {
 }
 
 fn run_worker(args: &Args) -> Result<()> {
-    RUNNING.store(true, Ordering::Relaxed);
-
     info!("Starting conntrack_exporter worker, collector={}", args.collector);
     apply_conntrack_sysctl_settings()?;
 
-    // Install signal handlers for worker shutdown
-    unsafe {
-        libc::signal(libc::SIGTERM, worker_signal_handler as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, worker_signal_handler as *const () as libc::sighandler_t);
-    }
+    // Consume shutdown signals through a descriptor so they are observed by the
+    // same poll() that waits for netlink data, with no EINTR races.
+    let signals = SignalFd::new(&[libc::SIGTERM, libc::SIGINT])
+        .context("Failed to set up signal handling")?;
 
     // Create UDP socket for IPFIX export
     let udp_socket = UdpSocket::bind("0.0.0.0:0").context("Failed to bind UDP socket")?;
@@ -115,7 +114,8 @@ fn run_worker(args: &Args) -> Result<()> {
 
     info!("Listening for conntrack NAT events...");
 
-    while RUNNING.load(Ordering::Relaxed) {
+    let mut running = true;
+    while running {
         // Check if template retransmit is due
         let now = Instant::now();
         if now.duration_since(last_template_time).as_secs()
@@ -142,16 +142,25 @@ fn run_worker(args: &Args) -> Result<()> {
 
         // Poll: use flush timeout if we have pending records, otherwise block
         let timeout = if message_active { FLUSH_TIMEOUT_MS } else { -1 };
-        let ready = match nl_socket.poll(timeout) {
-            Ok(ready) => ready,
+        let (ready, signalled) = match nl_socket.poll_with(signals.as_raw_fd(), timeout) {
+            Ok(state) => state,
             Err(e) => {
                 if e.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
-                error!("poll() failed: {}", e);
-                continue;
+                return Err(e).context("poll() on netlink socket failed");
             }
         };
+
+        if signalled {
+            for sig in signals.read_pending().context("failed to read signalfd")? {
+                info!("Received signal {}, shutting down", sig);
+                running = false;
+            }
+            if !running {
+                break;
+            }
+        }
 
         if !ready {
             // Timeout — flush pending records
@@ -246,20 +255,13 @@ fn run_supervisor(args: &Args) -> Result<()> {
     }
     redirect_stdio_to_devnull()?;
 
-    SUPERVISOR_RUNNING.store(true, Ordering::Relaxed);
-    unsafe {
-        libc::signal(
-            libc::SIGTERM,
-            supervisor_signal_handler as *const () as libc::sighandler_t,
-        );
-        libc::signal(
-            libc::SIGINT,
-            supervisor_signal_handler as *const () as libc::sighandler_t,
-        );
-    }
+    // SIGCHLD is included so a worker exit wakes the poll() below, letting the
+    // supervisor wait on signals and child status through one descriptor.
+    let signals = SignalFd::new(&[libc::SIGTERM, libc::SIGINT, libc::SIGCHLD])
+        .context("Failed to set up signal handling")?;
 
     info!("Supervisor started, pid={}", std::process::id());
-    while SUPERVISOR_RUNNING.load(Ordering::Relaxed) {
+    loop {
         let child_pid = unsafe { libc::fork() };
         if child_pid < 0 {
             return Err(anyhow::anyhow!(
@@ -269,57 +271,123 @@ fn run_supervisor(args: &Args) -> Result<()> {
         }
 
         if child_pid == 0 {
-            let rc = match run_worker(args) {
-                Ok(()) => 0,
+            // The child must not share the supervisor's signalfd or its
+            // inherited signal mask.
+            signals.close_in_child();
+            let rc = match signals::unblock_all().context("Failed to reset signal mask") {
                 Err(e) => {
-                    error!("Worker exited with error: {:#}", e);
+                    error!("{:#}", e);
                     1
                 }
+                Ok(()) => match run_worker(args) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        error!("Worker exited with error: {:#}", e);
+                        1
+                    }
+                },
             };
             unsafe { libc::_exit(rc) };
         }
 
-        let status = wait_for_child(child_pid)?;
-        if !SUPERVISOR_RUNNING.load(Ordering::Relaxed) {
-            break;
+        match supervise_child(&signals, child_pid)? {
+            Supervision::ShutdownRequested => break,
+            Supervision::Exited(status) => {
+                if !should_restart(status) {
+                    info!("Worker exited cleanly; supervisor stopping");
+                    break;
+                }
+                warn!("Worker terminated (status=0x{:x}); restarting in 1s", status);
+                thread::sleep(Duration::from_secs(1));
+            }
         }
-
-        if !should_restart(status) {
-            info!("Worker exited cleanly; supervisor stopping");
-            break;
-        }
-
-        warn!(
-            "Worker crashed (status=0x{:x}); restarting in 1s",
-            status
-        );
-        thread::sleep(Duration::from_secs(1));
     }
 
     info!("Supervisor shutting down.");
     Ok(())
 }
 
-fn wait_for_child(child_pid: libc::pid_t) -> Result<libc::c_int> {
+enum Supervision {
+    /// The worker exited on its own with this wait status.
+    Exited(libc::c_int),
+    /// A shutdown signal arrived; the worker has been stopped and reaped.
+    ShutdownRequested,
+}
+
+/// Wait for the worker to exit, or for a shutdown signal — in which case the
+/// signal is forwarded to the worker and we wait for it to go away.
+fn supervise_child(signals: &SignalFd, child_pid: libc::pid_t) -> Result<Supervision> {
+    let mut shutting_down = false;
+    let mut kill_deadline: Option<Instant> = None;
+
     loop {
-        let mut status: libc::c_int = 0;
-        let rc = unsafe { libc::waitpid(child_pid, &mut status as *mut libc::c_int, 0) };
-        if rc == child_pid {
-            return Ok(status);
+        if let Some(status) = try_reap(child_pid)? {
+            return Ok(if shutting_down {
+                Supervision::ShutdownRequested
+            } else {
+                Supervision::Exited(status)
+            });
         }
-        if rc < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                if !SUPERVISOR_RUNNING.load(Ordering::Relaxed) {
-                    unsafe {
-                        libc::kill(child_pid, libc::SIGTERM);
-                    }
+
+        let timeout = match kill_deadline {
+            Some(deadline) => ms_until(deadline, Instant::now()),
+            None => -1,
+        };
+
+        let ready = match signals::poll_readable(signals.as_raw_fd(), timeout) {
+            Ok(ready) => ready,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e).context("poll() on signalfd failed"),
+        };
+
+        if ready {
+            // SIGCHLD needs no handling beyond waking us for the reap above.
+            for sig in signals
+                .read_pending()
+                .context("failed to read signalfd")?
+                .into_iter()
+                .filter(|&sig| sig != libc::SIGCHLD)
+            {
+                if !shutting_down {
+                    info!("Received signal {}, stopping worker pid={}", sig, child_pid);
+                    shutting_down = true;
+                    unsafe { libc::kill(child_pid, libc::SIGTERM) };
+                    kill_deadline = Some(Instant::now() + WORKER_STOP_GRACE);
                 }
-                continue;
             }
+        } else if kill_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            warn!(
+                "Worker pid={} did not exit within {:?}; sending SIGKILL",
+                child_pid, WORKER_STOP_GRACE
+            );
+            unsafe { libc::kill(child_pid, libc::SIGKILL) };
+            kill_deadline = None;
+        }
+    }
+}
+
+/// Reap the worker if it has already exited, without blocking.
+fn try_reap(child_pid: libc::pid_t) -> Result<Option<libc::c_int>> {
+    let mut status: libc::c_int = 0;
+    let rc = unsafe { libc::waitpid(child_pid, &mut status as *mut libc::c_int, libc::WNOHANG) };
+    if rc == child_pid {
+        return Ok(Some(status));
+    }
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
             return Err(anyhow::anyhow!("waitpid() failed: {}", err));
         }
     }
+    Ok(None)
+}
+
+/// Milliseconds from `now` until `deadline`, clamped to a poll() timeout.
+fn ms_until(deadline: Instant, now: Instant) -> i32 {
+    deadline
+        .saturating_duration_since(now)
+        .as_millis()
+        .min(i32::MAX as u128) as i32
 }
 
 fn should_restart(status: libc::c_int) -> bool {
@@ -356,14 +424,6 @@ fn redirect_stdio_to_devnull() -> Result<()> {
         }
     }
     Ok(())
-}
-
-extern "C" fn worker_signal_handler(_sig: libc::c_int) {
-    RUNNING.store(false, Ordering::Relaxed);
-}
-
-extern "C" fn supervisor_signal_handler(_sig: libc::c_int) {
-    SUPERVISOR_RUNNING.store(false, Ordering::Relaxed);
 }
 
 fn set_send_buf(socket: &UdpSocket, size: usize) {

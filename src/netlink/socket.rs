@@ -159,19 +159,30 @@ impl NetlinkSocket {
         meminfo[SK_MEMINFO_DROPS] as u64
     }
 
-    /// Poll the socket for readability with a timeout in milliseconds.
-    /// Returns true if data is available, false on timeout.
-    pub fn poll(&self, timeout_ms: i32) -> Result<bool, io::Error> {
-        let mut pfd = libc::pollfd {
-            fd: self.fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    /// Poll this socket together with an auxiliary descriptor (the signalfd),
+    /// with a timeout in milliseconds; a negative timeout blocks.
+    /// Returns readiness for `(netlink, aux)`.
+    pub fn poll_with(&self, aux_fd: RawFd, timeout_ms: i32) -> Result<(bool, bool), io::Error> {
+        let mut fds = [
+            libc::pollfd {
+                fd: self.fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: aux_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(ret > 0 && (pfd.revents & libc::POLLIN) != 0)
+        Ok((
+            (fds[0].revents & libc::POLLIN) != 0,
+            (fds[1].revents & libc::POLLIN) != 0,
+        ))
     }
 }
 
