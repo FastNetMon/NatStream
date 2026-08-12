@@ -1,6 +1,6 @@
-# spank_ipfixd
+# conntrack_exporter
 
-`spank_ipfixd` is a Linux daemon that exports conntrack NAT events as IPFIX (RFC 7011) records over UDP.
+`conntrack_exporter` is a Linux daemon that exports conntrack NAT events as IPFIX (RFC 7011) records over UDP.
 
 It listens to netlink conntrack notifications, extracts NAT-relevant flow fields, and sends them as IPFIX data records to a configured collector.
 
@@ -28,29 +28,29 @@ cargo build             # debug
 cargo build --release   # optimized release
 ```
 
-Binary output is `target/debug/spank_ipfixd` or `target/release/spank_ipfixd`.
+Binary output is `target/debug/conntrack_exporter` or `target/release/conntrack_exporter`.
 
 ## Run
 
 ```bash
-sudo ./target/release/spank_ipfixd --collector <IP>:<port>
+sudo ./target/release/conntrack_exporter --collector <IP>:<port>
 ```
 
 Examples:
 
 ```bash
 # Basic foreground mode
-sudo ./target/release/spank_ipfixd --collector 203.0.113.10:4739
+sudo ./target/release/conntrack_exporter --collector 203.0.113.10:4739
 
 # Override buffers and domain id
-sudo ./target/release/spank_ipfixd \
+sudo ./target/release/conntrack_exporter \
   --collector 203.0.113.10:4739 \
   --recv-buf 8388608 \
   --send-buf 8388608 \
   --domain-id 100
 
 # Run with self-supervision and verbose logs
-sudo ./target/release/spank_ipfixd --collector 203.0.113.10:4739 --daemon -v
+sudo ./target/release/conntrack_exporter --collector 203.0.113.10:4739 --daemon -v
 ```
 
 ## Command-line options

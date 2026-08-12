@@ -23,7 +23,7 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 static SUPERVISOR_RUNNING: AtomicBool = AtomicBool::new(true);
 
 #[derive(Parser, Debug)]
-#[command(name = "spank_ipfixd", about = "Conntrack NAT event IPFIX exporter")]
+#[command(name = "conntrack_exporter", about = "Conntrack NAT event IPFIX exporter")]
 struct Args {
     /// IPFIX collector address (host:port)
     #[arg(short, long, default_value = "10.168.120.66:4739")]
@@ -69,7 +69,7 @@ fn main() -> Result<()> {
 fn run_worker(args: &Args) -> Result<()> {
     RUNNING.store(true, Ordering::Relaxed);
 
-    info!("Starting spank_ipfixd worker, collector={}", args.collector);
+    info!("Starting conntrack_exporter worker, collector={}", args.collector);
     apply_conntrack_sysctl_settings()?;
 
     // Install signal handlers for worker shutdown
