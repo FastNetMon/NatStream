@@ -120,13 +120,14 @@ target with `./build.sh`, then publishes them to a GitHub release:
 
 ```bash
 # Cargo.toml's version must already say 0.2.0 on the commit being tagged.
-git tag -a v0.2.0 -m 'NatStream 0.2.0'
-git push origin v0.2.0
+git tag -a 0.2.0 -m 'NatStream 0.2.0'
+git push origin 0.2.0
 ```
 
-The workflow refuses to build if the tag and `Cargo.toml` disagree, so a
+`0.2.0` and `v0.2.0` both trigger it, since the repository has tags of each
+kind. The workflow refuses to build if the tag and `Cargo.toml` disagree, so a
 mismatch costs a failed job rather than a wrong package. A version with a
-suffix (`v0.2.0-rc1`) is published as a pre-release.
+suffix (`0.2.0-rc1`) is published as a pre-release.
 
 Before publishing, the Ubuntu 24.04 package is installed and purged on the
 runner, which is the same distribution: a maintainer script that fails, a
@@ -135,7 +136,15 @@ build. The release carries the packages and a `SHA256SUMS` over them.
 
 Running the workflow by hand from the Actions tab builds all three packages and
 leaves them as workflow artifacts without publishing anything, which is how to
-exercise the packaging path without spending a tag.
+exercise the packaging path without spending a tag. Giving it a tag instead
+builds that tag and attaches the packages to its release, which is how a tag
+pushed before this workflow existed gets its packages:
+
+```bash
+gh workflow run release.yml --ref master -f tag=0.1.0
+```
+
+An existing release keeps its notes; only the packages are attached.
 
 Set the `DEB_MAINTAINER` repository variable to a real `Name <email>`;
 without it the packages carry the placeholder maintainer from

@@ -2,14 +2,26 @@ name: release
 
 # Publishes a GitHub release with a .deb per target distribution.
 #
-# Pushing a v* tag builds the packages and publishes them. A manual run builds
-# the same packages and leaves them as workflow artifacts without publishing,
-# which is how the packaging path gets exercised without spending a tag.
+# Pushing a version tag builds the packages and publishes them. Both spellings
+# trigger, because the repository has tags of each kind: 0.1.0 and v0.1.0.
+#
+# A manual run with no tag builds the same packages and leaves them as workflow
+# artifacts without publishing, which is how the packaging path gets exercised
+# without spending a tag. A manual run naming an existing tag builds that tag
+# and attaches the packages to its release, which is how a tag that was pushed
+# before this workflow existed, or a run that died after building, gets its
+# packages.
 on:
   push:
-    tags: ['v*']
+    tags:
+      - 'v[0-9]*'
+      - '[0-9]*'
   workflow_dispatch:
     inputs:
+      tag:
+        description: 'Existing tag to build and publish (blank: build only, publish nothing)'
+        required: false
+        default: ''
       deb_revision:
         description: 'Debian revision (the -N in 0.1.0-N~deb13)'
         required: false
@@ -41,22 +53,42 @@ jobs:
     outputs:
       version: ${{ steps.check.outputs.version }}
       prerelease: ${{ steps.check.outputs.prerelease }}
+      tag: ${{ steps.check.outputs.tag }}
+      publish: ${{ steps.check.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Empty on a tag push, where the triggering tag is already the ref.
+          ref: ${{ inputs.tag }}
 
       - name: Compare the tag with Cargo.toml
         id: check
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           version=$(awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' Cargo.toml)
           [ -n "${version}" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
 
-          if [ "${GITHUB_REF_TYPE}" = tag ]; then
-            tag_version="${GITHUB_REF_NAME#v}"
-            if [ "${tag_version}" != "${version}" ]; then
-              echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
+          # A tag push releases its own tag; a manual run releases the tag it
+          # was given, and releases nothing if it was given none.
+          if [ -n "${INPUT_TAG}" ]; then
+            tag="${INPUT_TAG}"
+          elif [ "${GITHUB_REF_TYPE}" = tag ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag=''
+          fi
+
+          # Both 1.2.3 and v1.2.3 are accepted; the version is what is left.
+          if [ -n "${tag}" ]; then
+            publish=true
+            if [ "${tag#v}" != "${version}" ]; then
+              echo "::error::tag ${tag} does not match Cargo.toml version ${version}"
               exit 1
             fi
+          else
+            publish=false
           fi
 
           # 0.2.0-rc1 and friends are published as pre-releases.
@@ -65,9 +97,13 @@ jobs:
             *)   prerelease=false ;;
           esac
 
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
-          echo "natstream ${version} (prerelease=${prerelease}, revision=${DEB_REVISION})"
+          {
+            echo "version=${version}"
+            echo "prerelease=${prerelease}"
+            echo "tag=${tag}"
+            echo "publish=${publish}"
+          } >> "$GITHUB_OUTPUT"
+          echo "natstream ${version} (tag=${tag:-none}, publish=${publish}, prerelease=${prerelease}, revision=${DEB_REVISION})"
 
   # One job per target distribution, using the same ./build.sh a developer runs
   # locally, so there is no second packaging path that can drift.
@@ -87,6 +123,8 @@ jobs:
             dist_tag: ubuntu26.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Build the package
         run: ./build.sh ${{ matrix.target }}
@@ -121,8 +159,8 @@ jobs:
   publish:
     name: publish release
     needs: [version, package]
-    # Only a tag publishes; a manual run stops after the packages are built.
-    if: github.ref_type == 'tag'
+    # A manual run with no tag stops after the packages are built.
+    if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -160,20 +198,31 @@ jobs:
           `systemctl enable --now natstream.service`.
           NOTES
 
-      - name: Create the release
+      # Uploading to a release that already exists rather than failing on it:
+      # the tag may have been released by hand, or by a run that built the
+      # packages and then died before attaching them. The existing release's
+      # notes are left alone; only the assets are replaced.
+      - name: Publish the packages
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
           PRERELEASE: ${{ needs.version.outputs.prerelease }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
-          args=(
-            --repo "${GITHUB_REPOSITORY}"
-            --title "NatStream ${VERSION}"
-            --notes-file notes.md
-            --generate-notes
-          )
-          if [ "${PRERELEASE}" = true ]; then
-            args+=(--prerelease)
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "release ${TAG} exists; uploading packages to it"
+            gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}" --clobber \
+              dist/*.deb dist/SHA256SUMS
+          else
+            args=(
+              --repo "${GITHUB_REPOSITORY}"
+              --title "NatStream ${VERSION}"
+              --notes-file notes.md
+              --generate-notes
+            )
+            if [ "${PRERELEASE}" = true ]; then
+              args+=(--prerelease)
+            fi
+            gh release create "${TAG}" "${args[@]}" dist/*.deb dist/SHA256SUMS
           fi
-          gh release create "${GITHUB_REF_NAME}" "${args[@]}" dist/*.deb dist/SHA256SUMS
