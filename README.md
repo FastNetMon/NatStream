@@ -6,18 +6,6 @@ It listens to netlink conntrack notifications, extracts NAT-relevant flow fields
 
 Upstream: <https://github.com/FastNetMon/NatStream>
 
-## What it does
-
-- Subscribes to `NFNLGRP_CONNTRACK_NEW` and `NFNLGRP_CONNTRACK_DESTROY` on `NETLINK_NETFILTER`.
-- Filters events to IPv4 NAT sessions (`IPS_SRC_NAT` or `IPS_DST_NAT`).
-- Emits records for CREATE/DELETE flow events.
-- Speaks IPFIX or NetFlow v9, with a selectable field set (see [Protocol and profiles](#protocol-and-profiles)).
-- Encodes records in a single template (ID `256` by default) and retransmits it every 30 seconds, on its own message if no traffic is flowing.
-- Flushes buffered IPFIX messages with:
-  - immediate send when buffer is full
-  - 100ms timeout flush for sparse traffic
-- Supports a simple self-supervised daemon mode that restarts the worker process on crash, with exponential backoff.
-
 ## Install (Debian / Ubuntu)
 
 `./build.sh` produces a `.deb` for a target distribution, built inside a Docker
@@ -119,61 +107,6 @@ line, so a local `cargo clippy` checks exactly what CI does. The casts that a
 wire format necessarily makes are annotated where they are, with the bound that
 makes each one safe; the few places where the layout of the source is doing the
 explaining carry `#[rustfmt::skip]`.
-
-## Testing
-
-Four layers, each covering what the one below it cannot.
-
-| Layer | Run with | Needs |
-|---|---|---|
-| Unit | `cargo test` | nothing |
-| Integration | `cargo test` | nothing |
-| End-to-end | `cargo test -- --ignored` | unprivileged user namespaces, `nf_conntrack`, `nft` |
-| Package | `./tests/e2e/qemu/run-qemu.sh` | Docker, QEMU, a readable host kernel |
-
-**Unit** tests cover the netlink parser against hand-built messages (including
-malformed ones), the encoder against the bytes it puts on the wire, the field
-tables behind each profile, counter clamping, signal handling and the
-supervisor's restart policy.
-
-**Integration** tests run the real binary and check that a bad flag is reported
-as a bad flag — before the exporter touches a sysctl or opens a socket.
-
-**End-to-end** tests run the exporter unmodified against a real kernel, in a
-throwaway user + network namespace where an unprivileged user holds
-`CAP_NET_ADMIN` over a network stack of its own. A DNAT rule and a UDP exchange
-produce genuine conntrack events; a collector decodes the export and checks the
-translated addresses, the event codes and the flow's final counters. Every
-protocol, profile and counter width is covered. It takes about 15 seconds.
-
-```bash
-./tests/e2e/run-netns.sh              # one configuration
-./tests/e2e/run-netns.sh --all        # every protocol and profile
-```
-
-On a host without those namespaces the harness skips rather than failing. Set
-`E2E_REQUIRE=1` — as CI does — to turn that skip into a failure, so an
-environment that silently tests nothing does not report success.
-
-**Package** tests boot a VM, install the `.deb`, and start the service through
-systemd exactly as shipped. That is the only layer that can check the claims
-made by the unit file: that the service is not enabled on install, that it runs
-under a transient unprivileged user with `CAP_NET_ADMIN` and nothing else, that
-it can still set the `nf_conntrack` sysctls from there, and that it stops
-cleanly. The VM boots the host's own kernel directly, so there is nothing to
-download.
-
-```bash
-./tests/e2e/qemu/run-qemu.sh              # builds the .deb and image if needed
-./tests/e2e/qemu/run-qemu.sh --rebuild    # rebuild the VM image first
-```
-
-The collector used by both end-to-end layers is also usable on its own, which
-is handy when pointing the exporter at something new:
-
-```bash
-python3 tests/e2e/flowdecode.py --bind 127.0.0.1:4739
-```
 
 ## Benchmarks
 
