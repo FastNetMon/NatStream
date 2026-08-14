@@ -730,3 +730,309 @@ fn set_proc_sysctl(path: &str, value: &str) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    // ---- Supervisor restart policy ----
+
+    /// Real wait statuses rather than hand-assembled ones, so the test cannot
+    /// agree with a wrong idea of the encoding.
+    fn wait_status(shell: &str) -> libc::c_int {
+        use std::os::unix::process::ExitStatusExt;
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(shell)
+            .status()
+            .expect("failed to run /bin/sh")
+            .into_raw()
+    }
+
+    /// A worker that exited cleanly asked to stop; restarting it would fight
+    /// the operator. Anything else is a failure worth restarting.
+    #[test]
+    fn only_a_clean_exit_stops_the_supervisor() {
+        assert!(!should_restart(wait_status("exit 0")));
+
+        for code in [1, 2, 42, 127] {
+            assert!(
+                should_restart(wait_status(&format!("exit {code}"))),
+                "exit {code} should restart"
+            );
+        }
+    }
+
+    #[test]
+    fn a_worker_killed_by_a_signal_is_restarted() {
+        // The crash this whole supervisor exists for.
+        assert!(should_restart(wait_status("kill -9 $$")));
+        assert!(should_restart(wait_status("kill -SEGV $$")));
+        assert!(should_restart(wait_status("kill -TERM $$")));
+    }
+
+    // ---- poll() timeout arithmetic ----
+
+    #[test]
+    fn a_future_deadline_becomes_its_distance_in_milliseconds() {
+        let now = Instant::now();
+        assert_eq!(ms_until(now + Duration::from_millis(250), now), 250);
+        assert_eq!(ms_until(now + Duration::from_secs(30), now), 30_000);
+    }
+
+    /// A deadline already past must poll without waiting, not block forever —
+    /// a negative timeout means "block" to poll().
+    #[test]
+    fn a_deadline_already_past_yields_a_zero_timeout() {
+        let now = Instant::now();
+        assert_eq!(ms_until(now - Duration::from_secs(1), now), 0);
+        assert_eq!(ms_until(now, now), 0);
+    }
+
+    /// poll() takes an int; a duration that would overflow it must clamp to a
+    /// long wait rather than wrapping into a negative "block forever".
+    #[test]
+    fn an_enormous_deadline_clamps_instead_of_wrapping() {
+        let now = Instant::now();
+        let timeout = ms_until(now + Duration::from_secs(60 * 60 * 24 * 365), now);
+        assert!(timeout > 0, "must not wrap negative");
+        assert_eq!(timeout, i32::MAX);
+    }
+
+    // ---- sysctl handling ----
+
+    fn temp_path(name: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "conntrack_exporter_test_{}_{}_{name}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        path
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn a_sysctl_holding_the_wrong_value_is_rewritten() {
+        let path = temp_path("events");
+        write_file(&path, "0\n");
+
+        set_proc_sysctl(path.to_str().unwrap(), "1").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "1\n");
+        fs::remove_file(&path).ok();
+    }
+
+    /// /proc/sys returns the value with a trailing newline, which is not part
+    /// of the value.
+    #[test]
+    fn surrounding_whitespace_is_not_part_of_the_value() {
+        for already_set in ["1\n", "1", "  1  \n", "1\n\n"] {
+            let path = temp_path("acct");
+            write_file(&path, already_set);
+
+            set_proc_sysctl(path.to_str().unwrap(), "1").unwrap();
+
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                already_set,
+                "{already_set:?} already reads as 1 and must be left alone"
+            );
+            fs::remove_file(&path).ok();
+        }
+    }
+
+    /// Writing a sysctl that already holds the right value is not just wasted
+    /// work: on a host where /proc/sys is read-only, the write fails and the
+    /// exporter would refuse to start over a setting that was already correct.
+    #[test]
+    fn a_sysctl_already_holding_the_value_is_not_written() {
+        let path = temp_path("readonly");
+        write_file(&path, "1\n");
+
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let result = set_proc_sysctl(path.to_str().unwrap(), "1");
+
+        // root ignores the permission bits, so the read-only file only proves
+        // anything for an unprivileged run; the Ok is checked either way.
+        assert!(result.is_ok(), "{:?}", result.err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "1\n");
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).ok();
+        fs::remove_file(&path).ok();
+    }
+
+    /// The usual cause is nf_conntrack not being loaded, so the message has to
+    /// name the path the operator should go looking for.
+    #[test]
+    fn a_missing_sysctl_reports_the_path_it_could_not_read() {
+        let path = temp_path("absent");
+        let err = set_proc_sysctl(path.to_str().unwrap(), "1").unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("failed to read sysctl"), "{message}");
+        assert!(message.contains(path.to_str().unwrap()), "{message}");
+    }
+
+    // ---- Command line ----
+
+    fn parse(args: &[&str]) -> Args {
+        let mut argv = vec!["conntrack_exporter"];
+        argv.extend_from_slice(args);
+        Args::try_parse_from(argv).expect("arguments should parse")
+    }
+
+    #[test]
+    fn the_command_line_definition_is_well_formed() {
+        use clap::CommandFactory;
+        Args::command().debug_assert();
+    }
+
+    /// The defaults are documented in the README and in the field-layout table,
+    /// so changing one silently changes what every existing deployment exports.
+    #[test]
+    fn the_documented_defaults_apply_when_nothing_is_given() {
+        let args = parse(&["--collector", "203.0.113.10:4739"]);
+
+        assert_eq!(
+            args.collector,
+            "203.0.113.10:4739".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(args.protocol, Protocol::Ipfix);
+        assert_eq!(args.profile, Profile::Full);
+        assert_eq!(args.counter_width, 8);
+        assert_eq!(args.template_id, 256);
+        assert_eq!(args.template_interval, 30);
+        assert_eq!(args.domain_id, 0);
+        assert_eq!(args.recv_buf, DEFAULT_RECV_BUF_SIZE);
+        assert_eq!(args.send_buf, DEFAULT_SEND_BUF_SIZE);
+        assert!(!args.verbose);
+        assert!(!args.daemon);
+        assert!(!args.no_sysctl);
+        assert_eq!(args.log_file, None);
+    }
+
+    #[test]
+    fn the_collector_is_required() {
+        let err = Args::try_parse_from(["conntrack_exporter"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn the_collector_must_be_an_address_and_port() {
+        for bad in ["203.0.113.10", "not-an-address", "203.0.113.10:notaport", ""] {
+            assert!(
+                Args::try_parse_from(["conntrack_exporter", "--collector", bad]).is_err(),
+                "{bad:?} should not parse as a collector"
+            );
+        }
+
+        // An IPv6 collector is a valid endpoint even though the exported flows
+        // are IPv4.
+        let args = parse(&["-c", "[2001:db8::1]:4739"]);
+        assert_eq!(args.collector.port(), 4739);
+        assert!(args.collector.is_ipv6());
+    }
+
+    /// The value names the README tells operators to put in EXPORTER_OPTS.
+    #[test]
+    fn the_documented_enum_values_are_accepted() {
+        assert_eq!(
+            parse(&["-c", "10.0.0.1:1", "--protocol", "netflow9"]).protocol,
+            Protocol::Netflow9
+        );
+        assert_eq!(
+            parse(&["-c", "10.0.0.1:1", "--protocol", "ipfix"]).protocol,
+            Protocol::Ipfix
+        );
+        assert_eq!(
+            parse(&["-c", "10.0.0.1:1", "--profile", "nat-source"]).profile,
+            Profile::NatSource
+        );
+        assert_eq!(
+            parse(&["-c", "10.0.0.1:1", "--profile", "flow-only"]).profile,
+            Profile::FlowOnly
+        );
+        assert_eq!(
+            parse(&["-c", "10.0.0.1:1", "--profile", "full"]).profile,
+            Profile::Full
+        );
+    }
+
+    #[test]
+    fn an_unknown_protocol_or_profile_is_refused() {
+        for args in [
+            ["--protocol", "netflow5"],
+            ["--protocol", "sflow"],
+            ["--profile", "everything"],
+        ] {
+            assert!(
+                Args::try_parse_from([
+                    "conntrack_exporter",
+                    "-c",
+                    "10.0.0.1:1",
+                    args[0],
+                    args[1]
+                ])
+                .is_err(),
+                "{args:?} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_remaining_options_are_carried_through() {
+        let args = parse(&[
+            "-c",
+            "203.0.113.10:2055",
+            "--counter-width",
+            "4",
+            "--template-id",
+            "300",
+            "--template-interval",
+            "60",
+            "--domain-id",
+            "100",
+            "--recv-buf",
+            "8388608",
+            "--send-buf",
+            "8388608",
+            "--log-file",
+            "/var/log/conntrack_exporter.log",
+            "--verbose",
+            "--daemon",
+            "--no-sysctl",
+        ]);
+
+        assert_eq!(args.counter_width, 4);
+        assert_eq!(args.template_id, 300);
+        assert_eq!(args.template_interval, 60);
+        assert_eq!(args.domain_id, 100);
+        assert_eq!(args.recv_buf, 8 * 1024 * 1024);
+        assert_eq!(args.send_buf, 8 * 1024 * 1024);
+        assert_eq!(
+            args.log_file,
+            Some(PathBuf::from("/var/log/conntrack_exporter.log"))
+        );
+        assert!(args.verbose);
+        assert!(args.daemon);
+        assert!(args.no_sysctl);
+    }
+
+    #[test]
+    fn the_short_flags_match_their_long_forms() {
+        let short = parse(&["-c", "10.0.0.1:4739", "-v"]);
+        let long = parse(&["--collector", "10.0.0.1:4739", "--verbose"]);
+
+        assert_eq!(short.collector, long.collector);
+        assert_eq!(short.verbose, long.verbose);
+    }
+}

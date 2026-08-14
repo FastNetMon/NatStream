@@ -408,3 +408,382 @@ impl Template {
         records
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_PROTOCOLS: [Protocol; 2] = [Protocol::Ipfix, Protocol::Netflow9];
+    const ALL_PROFILES: [Profile; 3] = [Profile::Full, Profile::NatSource, Profile::FlowOnly];
+    const ALL_WIDTHS: [CounterWidth; 2] = [CounterWidth::Four, CounterWidth::Eight];
+
+    fn resolve(protocol: Protocol, profile: Profile, width: CounterWidth) -> Template {
+        Template::resolve(protocol, profile, width, DEFAULT_TEMPLATE_ID).unwrap()
+    }
+
+    /// Every (protocol, profile, width) combination the CLI can ask for.
+    fn every_configuration() -> impl Iterator<Item = (Protocol, Profile, CounterWidth)> {
+        ALL_PROTOCOLS.into_iter().flat_map(|protocol| {
+            ALL_PROFILES.into_iter().flat_map(move |profile| {
+                ALL_WIDTHS
+                    .into_iter()
+                    .map(move |width| (protocol, profile, width))
+            })
+        })
+    }
+
+    /// The profile table in the README, which is what an operator picks from.
+    /// Field count and record size are the two numbers they have to match
+    /// against their collector, so a silent change to either is a bug.
+    #[test]
+    fn profiles_carry_the_documented_field_count_and_record_size() {
+        let expected = [
+            (Profile::Full, 14, 58, 42),
+            (Profile::NatSource, 12, 52, 36),
+            (Profile::FlowOnly, 9, 45, 29),
+        ];
+
+        for (profile, fields, wide_record, narrow_record) in expected {
+            for protocol in ALL_PROTOCOLS {
+                let wide = resolve(protocol, profile, CounterWidth::Eight);
+                assert_eq!(wide.field_count(), fields, "{profile:?} field count");
+                assert_eq!(wide.record_size, wide_record, "{profile:?} 8-byte counters");
+
+                let narrow = resolve(protocol, profile, CounterWidth::Four);
+                assert_eq!(narrow.field_count(), fields, "{profile:?} field count");
+                assert_eq!(
+                    narrow.record_size, narrow_record,
+                    "{profile:?} 4-byte counters"
+                );
+            }
+        }
+    }
+
+    /// The record layout table in the README, in order. These IDs are what a
+    /// collector matches its own registry against.
+    #[test]
+    fn the_full_profile_advertises_the_documented_elements_in_order() {
+        let ipfix = resolve(Protocol::Ipfix, Profile::Full, CounterWidth::Eight);
+        let specifiers: Vec<(u16, Option<u32>, u16)> = ipfix
+            .fields
+            .iter()
+            .map(|f| (f.id, f.pen, f.length))
+            .collect();
+
+        const PEN: Option<u32> = Some(REVERSE_INFORMATION_ELEMENT_PEN);
+        assert_eq!(
+            specifiers,
+            vec![
+                (230, None, 1), // natEvent
+                (4, None, 1),   // protocolIdentifier
+                (8, None, 4),   // sourceIPv4Address
+                (12, None, 4),  // destinationIPv4Address
+                (7, None, 2),   // sourceTransportPort
+                (11, None, 2),  // destinationTransportPort
+                (225, None, 4), // postNATSourceIPv4Address
+                (227, None, 2), // postNAPTSourceTransportPort
+                (226, None, 4), // postNATDestinationIPv4Address
+                (228, None, 2), // postNAPTDestinationTransportPort
+                (1, None, 8),   // octetDeltaCount
+                (2, None, 8),   // packetDeltaCount
+                (1, PEN, 8),    // reverseOctetDeltaCount
+                (2, PEN, 8),    // reversePacketDeltaCount
+            ]
+        );
+    }
+
+    /// Same values, but v9 has no enterprise mechanism, so the reverse counters
+    /// become the dedicated OUT_BYTES/OUT_PKTS types.
+    #[test]
+    fn the_netflow9_full_profile_swaps_the_reverse_elements_for_out_counters() {
+        let v9 = resolve(Protocol::Netflow9, Profile::Full, CounterWidth::Eight);
+        let ids: Vec<u16> = v9.fields.iter().map(|f| f.id).collect();
+
+        assert_eq!(
+            ids,
+            vec![230, 4, 8, 12, 7, 11, 225, 227, 226, 228, 1, 2, V9_OUT_BYTES, V9_OUT_PKTS]
+        );
+    }
+
+    /// IEs 23/24 mean postOctetDeltaCount/postPacketDeltaCount under IPFIX —
+    /// the forward direction through a middlebox, not the reverse direction.
+    /// Emitting them there would report a different quantity under the same
+    /// numbers, so IPFIX must keep the RFC 5103 enterprise elements.
+    #[test]
+    fn ipfix_never_borrows_the_netflow9_out_counter_types() {
+        for (profile, width) in ALL_PROFILES.into_iter().flat_map(|p| {
+            ALL_WIDTHS.into_iter().map(move |w| (p, w))
+        }) {
+            let template = resolve(Protocol::Ipfix, profile, width);
+            for field in &template.fields {
+                if field.pen.is_none() {
+                    assert!(
+                        field.id != V9_OUT_BYTES && field.id != V9_OUT_PKTS,
+                        "{profile:?}: IE {} means something else under IPFIX",
+                        field.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn netflow9_never_resolves_an_enterprise_element() {
+        for (profile, width) in ALL_PROFILES.into_iter().flat_map(|p| {
+            ALL_WIDTHS.into_iter().map(move |w| (p, w))
+        }) {
+            let template = resolve(Protocol::Netflow9, profile, width);
+            assert!(
+                template.fields.iter().all(|f| f.pen.is_none()),
+                "{profile:?}: v9 field specifiers cannot carry a PEN"
+            );
+        }
+    }
+
+    /// `flow-only` exists for collectors that cannot decode the NAT elements.
+    /// If any of them leaked back in, the profile would fail on exactly the
+    /// collectors it was added for.
+    #[test]
+    fn the_flow_only_profile_carries_no_nat_elements() {
+        const NAT_ELEMENTS: [u16; 5] = [
+            IE_NAT_EVENT,
+            IE_POST_NAT_SOURCE_IPV4_ADDRESS,
+            IE_POST_NAPT_SOURCE_TRANSPORT_PORT,
+            IE_POST_NAT_DESTINATION_IPV4_ADDRESS,
+            IE_POST_NAPT_DESTINATION_TRANSPORT_PORT,
+        ];
+
+        for protocol in ALL_PROTOCOLS {
+            let template = resolve(protocol, Profile::FlowOnly, CounterWidth::Eight);
+            for field in &template.fields {
+                assert!(
+                    !NAT_ELEMENTS.contains(&field.id),
+                    "{protocol:?}: IE {} is a NAT element",
+                    field.id
+                );
+            }
+            // What it does carry: the pre-NAT five-tuple and the counters.
+            assert!(
+                template
+                    .fields
+                    .iter()
+                    .any(|f| f.source == FieldSource::SrcIp),
+                "the pre-NAT five-tuple is the point of the profile"
+            );
+        }
+    }
+
+    /// `nat-source` drops the destination translation and nothing else.
+    #[test]
+    fn the_nat_source_profile_drops_only_the_destination_translation() {
+        let template = resolve(Protocol::Ipfix, Profile::NatSource, CounterWidth::Eight);
+        let sources: Vec<FieldSource> = template.fields.iter().map(|f| f.source).collect();
+
+        assert!(sources.contains(&FieldSource::NatEvent));
+        assert!(sources.contains(&FieldSource::PostNatSrcIp));
+        assert!(sources.contains(&FieldSource::PostNatSrcPort));
+        assert!(!sources.contains(&FieldSource::PostNatDstIp));
+        assert!(!sources.contains(&FieldSource::PostNatDstPort));
+    }
+
+    /// A resolved field's declared width must match what the encoder will
+    /// actually write for that source, or the record and the template it
+    /// advertises would disagree on the wire.
+    #[test]
+    fn every_resolved_field_is_as_wide_as_its_source() {
+        for (protocol, profile, width) in every_configuration() {
+            let template = resolve(protocol, profile, width);
+            for field in &template.fields {
+                match field.source.natural_len() {
+                    Some(natural) => assert_eq!(
+                        field.length, natural,
+                        "{protocol:?}/{profile:?}: {:?} is a fixed-width source",
+                        field.source
+                    ),
+                    None => assert_eq!(
+                        field.length,
+                        width.bytes(),
+                        "{protocol:?}/{profile:?}: {:?} is a counter",
+                        field.source
+                    ),
+                }
+            }
+            let declared: usize = template.fields.iter().map(|f| f.length as usize).sum();
+            assert_eq!(declared, template.record_size);
+        }
+    }
+
+    // ---- Sizing ----
+
+    /// `set_size` is what the encoder writes into the set header before it has
+    /// written the set, so it has to match the specifiers exactly.
+    #[test]
+    fn the_template_set_size_accounts_for_every_specifier() {
+        for (protocol, profile, width) in every_configuration() {
+            let template = resolve(protocol, profile, width);
+            let specifiers: usize = template
+                .fields
+                .iter()
+                .map(|f| match f.pen {
+                    Some(_) => FIELD_SPECIFIER_LEN + ENTERPRISE_NUMBER_LEN,
+                    None => FIELD_SPECIFIER_LEN,
+                })
+                .sum();
+
+            let unpadded = SET_HEADER_LEN + 4 + specifiers;
+            assert_eq!(
+                template.set_size(),
+                align_up(unpadded, protocol.set_alignment())
+            );
+            assert_eq!(
+                template.set_size() % protocol.set_alignment(),
+                0,
+                "{protocol:?} sets must land on their alignment"
+            );
+        }
+    }
+
+    #[test]
+    fn data_sets_are_padded_only_where_the_protocol_asks() {
+        let ipfix = resolve(Protocol::Ipfix, Profile::Full, CounterWidth::Eight);
+        // IPFIX sets are not padded, so the size is exact for any count.
+        for records in 0..4 {
+            assert_eq!(
+                ipfix.data_set_size(records),
+                SET_HEADER_LEN + records * 58
+            );
+        }
+
+        // A 58-byte record leaves an odd v9 FlowSet for odd counts, which RFC
+        // 3954 asks to be padded up to a 4-byte boundary.
+        let v9 = resolve(Protocol::Netflow9, Profile::Full, CounterWidth::Eight);
+        for records in 0..4 {
+            let size = v9.data_set_size(records);
+            assert_eq!(size % NETFLOW9_ALIGNMENT, 0, "{records} records");
+            assert!(size >= SET_HEADER_LEN + records * 58);
+            assert!(size < SET_HEADER_LEN + records * 58 + NETFLOW9_ALIGNMENT);
+        }
+    }
+
+    /// The figure logged at startup, and the one an operator sizes their
+    /// collector against. It must be achievable in the worst case — a message
+    /// that also carries the template.
+    #[test]
+    fn the_reported_capacity_fits_alongside_the_template() {
+        for (protocol, profile, width) in every_configuration() {
+            let template = resolve(protocol, profile, width);
+            let capacity = template.max_records_per_message();
+            let label = format!("{protocol:?}/{profile:?}/{width:?}");
+
+            assert!(capacity > 0, "{label}: no records fit");
+
+            let used = |records| {
+                protocol.header_len() + template.set_size() + template.data_set_size(records)
+            };
+            assert!(used(capacity) <= MAX_MSG_SIZE, "{label}: capacity overflows");
+            assert!(
+                used(capacity + 1) > MAX_MSG_SIZE,
+                "{label}: one more record would still have fit"
+            );
+        }
+    }
+
+    #[test]
+    fn align_up_rounds_to_the_next_multiple() {
+        assert_eq!(align_up(0, 4), 0);
+        assert_eq!(align_up(1, 4), 4);
+        assert_eq!(align_up(4, 4), 4);
+        assert_eq!(align_up(5, 4), 8);
+        // Alignment of 1 is the IPFIX case: never any padding.
+        for value in 0..8 {
+            assert_eq!(align_up(value, 1), value);
+        }
+    }
+
+    // ---- Validation ----
+
+    /// Template IDs below 256 collide with the set / FlowSet identifiers, so a
+    /// collector would read a data set as a template set.
+    #[test]
+    fn template_ids_below_the_reserved_range_are_rejected() {
+        for id in [0, 1, 2, 255] {
+            let err = Template::resolve(
+                Protocol::Ipfix,
+                Profile::Full,
+                CounterWidth::Eight,
+                id,
+            )
+            .expect_err("template ID {id} must be rejected");
+            assert!(
+                err.to_string().contains("at least 256"),
+                "unhelpful error: {err}"
+            );
+        }
+
+        assert!(
+            Template::resolve(
+                Protocol::Ipfix,
+                Profile::Full,
+                CounterWidth::Eight,
+                MIN_TEMPLATE_ID
+            )
+            .is_ok(),
+            "256 is the first usable ID"
+        );
+        assert!(
+            Template::resolve(
+                Protocol::Ipfix,
+                Profile::Full,
+                CounterWidth::Eight,
+                u16::MAX
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_template_id_is_carried_through_to_the_resolved_template() {
+        let template = Template::resolve(
+            Protocol::Ipfix,
+            Profile::Full,
+            CounterWidth::Eight,
+            4242,
+        )
+        .unwrap();
+        assert_eq!(template.template_id, 4242);
+    }
+
+    #[test]
+    fn counter_width_accepts_only_four_or_eight_bytes() {
+        assert_eq!(CounterWidth::from_bytes(4).unwrap(), CounterWidth::Four);
+        assert_eq!(CounterWidth::from_bytes(8).unwrap(), CounterWidth::Eight);
+        assert_eq!(CounterWidth::Four.bytes(), 4);
+        assert_eq!(CounterWidth::Eight.bytes(), 8);
+
+        for bad in [0u8, 1, 2, 3, 5, 6, 7, 9, 16, 255] {
+            let err = CounterWidth::from_bytes(bad)
+                .expect_err("width {bad} must be rejected");
+            assert!(
+                err.to_string().contains("must be 4 or 8"),
+                "unhelpful error: {err}"
+            );
+        }
+    }
+
+    // ---- Protocol traits ----
+
+    #[test]
+    fn each_protocol_reports_its_own_wire_constants() {
+        assert_eq!(Protocol::Ipfix.version(), 10);
+        assert_eq!(Protocol::Ipfix.header_len(), 16);
+        assert_eq!(Protocol::Ipfix.template_set_id(), 2);
+        assert!(Protocol::Ipfix.supports_enterprise());
+        assert_eq!(Protocol::Ipfix.set_alignment(), 1, "IPFIX sets are unpadded");
+
+        assert_eq!(Protocol::Netflow9.version(), 9);
+        assert_eq!(Protocol::Netflow9.header_len(), 20);
+        assert_eq!(Protocol::Netflow9.template_set_id(), 0);
+        assert!(!Protocol::Netflow9.supports_enterprise());
+        assert_eq!(Protocol::Netflow9.set_alignment(), 4);
+    }
+}

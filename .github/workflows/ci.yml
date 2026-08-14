@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Everything that needs nothing from the kernel: the unit tests, and the
+  # integration tests that drive the real binary's configuration handling.
+  test:
+    name: build, lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add clippy
+          rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+  # The end-to-end test: the exporter running against a real kernel, in a user
+  # + network namespace. It needs the conntrack modules loaded and unprivileged
+  # user namespaces permitted, neither of which is a given on a runner.
+  e2e:
+    name: end-to-end (namespace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-e2e-${{ runner.os }}-
+
+      - name: Install nftables
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nftables iproute2
+
+      - name: Prepare the kernel
+        run: |
+          # A user namespace can use a module but cannot load one.
+          sudo modprobe nf_conntrack
+          sudo modprobe nf_nat
+          sudo modprobe nf_tables
+          sudo modprobe nft_chain_nat
+          # Ubuntu 24.04 restricts unprivileged user namespaces through
+          # AppArmor, which is exactly the privilege this test relies on.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          # Fail the job now rather than skipping quietly later.
+          unshare --user --map-root-user --net true
+
+      - name: End-to-end test
+        # Without this the harness would skip on a runner that cannot provide
+        # the namespaces, and report a green build that tested nothing.
+        env:
+          E2E_REQUIRE: 1
+        run: cargo test --locked -- --ignored --nocapture

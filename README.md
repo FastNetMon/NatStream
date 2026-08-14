@@ -105,10 +105,65 @@ net-namespace-wide and are not restored on exit.
 ```bash
 cargo build             # debug
 cargo build --release   # optimized release
-cargo test              # unit tests for the parser and encoder
+cargo test              # unit and integration tests
 ```
 
 Binary output is `target/debug/conntrack_exporter` or `target/release/conntrack_exporter`.
+
+## Testing
+
+Four layers, each covering what the one below it cannot.
+
+| Layer | Run with | Needs |
+|---|---|---|
+| Unit | `cargo test` | nothing |
+| Integration | `cargo test` | nothing |
+| End-to-end | `cargo test -- --ignored` | unprivileged user namespaces, `nf_conntrack`, `nft` |
+| Package | `./tests/e2e/qemu/run-qemu.sh` | Docker, QEMU, a readable host kernel |
+
+**Unit** tests cover the netlink parser against hand-built messages (including
+malformed ones), the encoder against the bytes it puts on the wire, the field
+tables behind each profile, counter clamping, signal handling and the
+supervisor's restart policy.
+
+**Integration** tests run the real binary and check that a bad flag is reported
+as a bad flag — before the exporter touches a sysctl or opens a socket.
+
+**End-to-end** tests run the exporter unmodified against a real kernel, in a
+throwaway user + network namespace where an unprivileged user holds
+`CAP_NET_ADMIN` over a network stack of its own. A DNAT rule and a UDP exchange
+produce genuine conntrack events; a collector decodes the export and checks the
+translated addresses, the event codes and the flow's final counters. Every
+protocol, profile and counter width is covered. It takes about 15 seconds.
+
+```bash
+./tests/e2e/run-netns.sh              # one configuration
+./tests/e2e/run-netns.sh --all        # every protocol and profile
+```
+
+On a host without those namespaces the harness skips rather than failing. Set
+`E2E_REQUIRE=1` — as CI does — to turn that skip into a failure, so an
+environment that silently tests nothing does not report success.
+
+**Package** tests boot a VM, install the `.deb`, and start the service through
+systemd exactly as shipped. That is the only layer that can check the claims
+made by the unit file: that the service is not enabled on install, that it runs
+under a transient unprivileged user with `CAP_NET_ADMIN` and nothing else, that
+it can still set the `nf_conntrack` sysctls from there, and that it stops
+cleanly. The VM boots the host's own kernel directly, so there is nothing to
+download.
+
+```bash
+./tests/e2e/qemu/run-qemu.sh              # builds the .deb and image if needed
+./tests/e2e/qemu/run-qemu.sh --rebuild    # rebuild the VM image first
+```
+
+The collector used by both end-to-end layers is also usable on its own, which
+is handy when pointing the exporter at something new:
+
+```bash
+python3 tests/e2e/flowdecode.py --bind 127.0.0.1:4739
+```
 
 ## Run
 

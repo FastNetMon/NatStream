@@ -115,3 +115,129 @@ pub fn poll_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
     }
     Ok(ret > 0 && (pfd.revents & libc::POLLIN) != 0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// The signal mask is per-thread and every test runs on its own thread, so
+    /// blocking a signal here cannot leak into another test. `raise()` is
+    /// thread-directed for the same reason, which keeps delivery on the thread
+    /// that owns the descriptor.
+    ///
+    /// SIGUSR1/SIGUSR2 stand in for the real SIGTERM/SIGINT: the mechanism is
+    /// identical and the test harness has no use for them, so a mistake here
+    /// cannot be confused with a genuine shutdown request.
+    const TEST_SIGNALS: [libc::c_int; 2] = [libc::SIGUSR1, libc::SIGUSR2];
+
+    fn is_blocked(sig: libc::c_int) -> bool {
+        let mut mask: libc::sigset_t = unsafe { mem::zeroed() };
+        unsafe { libc::sigemptyset(&mut mask) };
+        assert_eq!(
+            unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, ptr::null(), &mut mask) },
+            0
+        );
+        (unsafe { libc::sigismember(&mask, sig) }) == 1
+    }
+
+    /// Blocking is the whole point: an unblocked signal would run its default
+    /// disposition and kill the process instead of landing on the descriptor.
+    #[test]
+    fn creating_the_descriptor_blocks_its_signals() {
+        assert!(!is_blocked(libc::SIGUSR1), "precondition");
+
+        let _signals = SignalFd::new(&TEST_SIGNALS).unwrap();
+
+        assert!(is_blocked(libc::SIGUSR1));
+        assert!(is_blocked(libc::SIGUSR2));
+    }
+
+    #[test]
+    fn a_raised_signal_becomes_readable_and_is_reported() {
+        let signals = SignalFd::new(&[libc::SIGUSR1]).unwrap();
+        assert!(
+            !poll_readable(signals.as_raw_fd(), 0).unwrap(),
+            "nothing pending yet"
+        );
+
+        unsafe { libc::raise(libc::SIGUSR1) };
+
+        assert!(poll_readable(signals.as_raw_fd(), 1000).unwrap());
+        assert_eq!(signals.read_pending().unwrap(), vec![libc::SIGUSR1]);
+    }
+
+    #[test]
+    fn every_pending_signal_is_drained_in_one_read() {
+        let signals = SignalFd::new(&TEST_SIGNALS).unwrap();
+
+        unsafe { libc::raise(libc::SIGUSR1) };
+        unsafe { libc::raise(libc::SIGUSR2) };
+
+        let mut pending = signals.read_pending().unwrap();
+        pending.sort_unstable();
+        let mut expected = TEST_SIGNALS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(pending, expected);
+
+        // Draining leaves the descriptor idle rather than blocking on it.
+        assert!(signals.read_pending().unwrap().is_empty());
+        assert!(!poll_readable(signals.as_raw_fd(), 0).unwrap());
+    }
+
+    /// The descriptor is opened non-blocking, so the event loop can drain it
+    /// without knowing how many signals are waiting.
+    #[test]
+    fn reading_an_idle_descriptor_returns_nothing_instead_of_blocking() {
+        let signals = SignalFd::new(&[libc::SIGUSR1]).unwrap();
+
+        let started = Instant::now();
+        assert!(signals.read_pending().unwrap().is_empty());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "read_pending must not block"
+        );
+    }
+
+    /// A signal raised before the loop reaches its poll() must still be seen:
+    /// blocked signals stay pending, which is what closes the race between
+    /// testing a shutdown flag and entering a blocking wait.
+    #[test]
+    fn a_signal_raised_before_polling_is_not_lost() {
+        let signals = SignalFd::new(&[libc::SIGUSR1]).unwrap();
+        unsafe { libc::raise(libc::SIGUSR1) };
+
+        // Whatever the loop was doing in between, the signal is still there.
+        std::thread::sleep(Duration::from_millis(20));
+
+        assert!(poll_readable(signals.as_raw_fd(), 0).unwrap());
+        assert_eq!(signals.read_pending().unwrap(), vec![libc::SIGUSR1]);
+    }
+
+    #[test]
+    fn polling_an_idle_descriptor_waits_out_the_timeout() {
+        let signals = SignalFd::new(&[libc::SIGUSR1]).unwrap();
+
+        let started = Instant::now();
+        assert!(!poll_readable(signals.as_raw_fd(), 50).unwrap());
+        assert!(
+            started.elapsed() >= Duration::from_millis(45),
+            "poll returned early"
+        );
+    }
+
+    /// A forked worker inherits the supervisor's mask and would otherwise be
+    /// deaf to the SIGTERM the supervisor sends it.
+    #[test]
+    fn unblocking_restores_an_empty_mask() {
+        let signals = SignalFd::new(&TEST_SIGNALS).unwrap();
+        assert!(is_blocked(libc::SIGUSR1));
+        drop(signals);
+
+        unblock_all().unwrap();
+
+        assert!(!is_blocked(libc::SIGUSR1));
+        assert!(!is_blocked(libc::SIGUSR2));
+        assert!(!is_blocked(libc::SIGTERM));
+    }
+}

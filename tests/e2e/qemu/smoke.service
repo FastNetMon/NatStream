@@ -1,0 +1,17 @@
+[Unit]
+Description=conntrack-exporter package smoke test
+# Ordered after the boot has settled, so the test starts the service under the
+# same conditions an operator would.
+After=multi-user.target
+ConditionPathExists=/opt/smoke/run.sh
+
+[Service]
+Type=oneshot
+ExecStart=/opt/smoke/run.sh
+# The host reads the result off the serial console.
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
