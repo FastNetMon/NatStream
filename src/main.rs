@@ -11,12 +11,12 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use log::{debug, error, info, warn};
 
-use conntrack_exporter::export::{self, CounterWidth, Encoder, Profile, Protocol, Template};
-use conntrack_exporter::netlink::constants::{
+use natstream::export::{self, CounterWidth, Encoder, Profile, Protocol, Template};
+use natstream::netlink::constants::{
     DEFAULT_RECV_BUF_SIZE, DEFAULT_SEND_BUF_SIZE, buffer_size, socklen,
 };
-use conntrack_exporter::netlink::{NetlinkSocket, parse_conntrack_messages};
-use conntrack_exporter::signals::{self, SignalFd};
+use natstream::netlink::{NetlinkSocket, parse_conntrack_messages};
+use natstream::signals::{self, SignalFd};
 
 /// How long the supervisor waits for the worker to exit on its own after
 /// SIGTERM before escalating to SIGKILL.
@@ -44,7 +44,7 @@ const CONNTRACK_EVENTS_SYSCTL: &str = "/proc/sys/net/netfilter/nf_conntrack_even
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "conntrack_exporter",
+    name = "natstream",
     version,
     about = "Conntrack NAT event IPFIX / NetFlow v9 exporter"
 )]
@@ -136,10 +136,7 @@ fn run_worker(args: &Args) -> Result<()> {
     )
     .context("Invalid export configuration")?;
 
-    info!(
-        "Starting conntrack_exporter worker, collector={}",
-        args.collector
-    );
+    info!("Starting natstream worker, collector={}", args.collector);
     info!(
         "Exporting {:?}, profile={:?}, counters={}B, record={}B, template id={}, \
          up to {} records per message",
@@ -798,7 +795,7 @@ mod tests {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "conntrack_exporter_test_{}_{}_{name}",
+            "natstream_test_{}_{}_{name}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
@@ -875,7 +872,7 @@ mod tests {
     // ---- Command line ----
 
     fn parse(args: &[&str]) -> Args {
-        let mut command_line = vec!["conntrack_exporter"];
+        let mut command_line = vec!["natstream"];
         command_line.extend_from_slice(args);
         Args::try_parse_from(command_line).expect("arguments should parse")
     }
@@ -912,7 +909,7 @@ mod tests {
 
     #[test]
     fn the_collector_is_required() {
-        let err = Args::try_parse_from(["conntrack_exporter"]).unwrap_err();
+        let err = Args::try_parse_from(["natstream"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
@@ -925,7 +922,7 @@ mod tests {
             "",
         ] {
             assert!(
-                Args::try_parse_from(["conntrack_exporter", "--collector", bad]).is_err(),
+                Args::try_parse_from(["natstream", "--collector", bad]).is_err(),
                 "{bad:?} should not parse as a collector"
             );
         }
@@ -970,8 +967,7 @@ mod tests {
             ["--profile", "everything"],
         ] {
             assert!(
-                Args::try_parse_from(["conntrack_exporter", "-c", "10.0.0.1:1", args[0], args[1]])
-                    .is_err(),
+                Args::try_parse_from(["natstream", "-c", "10.0.0.1:1", args[0], args[1]]).is_err(),
                 "{args:?} should be refused"
             );
         }
@@ -995,7 +991,7 @@ mod tests {
             "--send-buf",
             "8388608",
             "--log-file",
-            "/var/log/conntrack_exporter.log",
+            "/var/log/natstream.log",
             "--verbose",
             "--daemon",
             "--no-sysctl",
@@ -1007,10 +1003,7 @@ mod tests {
         assert_eq!(args.domain_id, 100);
         assert_eq!(args.recv_buf, 8 * 1024 * 1024);
         assert_eq!(args.send_buf, 8 * 1024 * 1024);
-        assert_eq!(
-            args.log_file,
-            Some(PathBuf::from("/var/log/conntrack_exporter.log"))
-        );
+        assert_eq!(args.log_file, Some(PathBuf::from("/var/log/natstream.log")));
         assert!(args.verbose);
         assert!(args.daemon);
         assert!(args.no_sysctl);

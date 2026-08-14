@@ -18,17 +18,17 @@ use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use conntrack_exporter::event::{ConntrackEvent, NatEventType};
-use conntrack_exporter::export::elements::DEFAULT_TEMPLATE_ID;
-use conntrack_exporter::export::template::{CounterWidth, Profile, Protocol, Template};
-use conntrack_exporter::export::{Encoder, template};
-use conntrack_exporter::netlink::constants::{
+use natstream::event::{ConntrackEvent, NatEventType};
+use natstream::export::elements::DEFAULT_TEMPLATE_ID;
+use natstream::export::template::{CounterWidth, Profile, Protocol, Template};
+use natstream::export::{Encoder, template};
+use natstream::netlink::constants::{
     CTA_COUNTERS_BYTES, CTA_COUNTERS_ORIG, CTA_COUNTERS_PACKETS, CTA_COUNTERS_REPLY, CTA_IP_V4_DST,
     CTA_IP_V4_SRC, CTA_PROTO_DST_PORT, CTA_PROTO_NUM, CTA_PROTO_SRC_PORT, CTA_STATUS, CTA_TUPLE_IP,
     CTA_TUPLE_ORIG, CTA_TUPLE_PROTO, CTA_TUPLE_REPLY, IPCTNL_MSG_CT_DELETE, IPCTNL_MSG_CT_NEW,
     IPS_SRC_NAT, NFNL_SUBSYS_CTNETLINK, NFPROTO_IPV4, NLA_ALIGNTO, NLA_HDRLEN, NLMSG_HDRLEN,
 };
-use conntrack_exporter::netlink::parse_conntrack_messages;
+use natstream::netlink::parse_conntrack_messages;
 
 // ---- Building netlink datagrams as the kernel delivers them ----
 

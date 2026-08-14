@@ -8,7 +8,7 @@ use std::io::Read;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-const EXPORTER: &str = env!("CARGO_BIN_EXE_conntrack_exporter");
+const EXPORTER: &str = env!("CARGO_BIN_EXE_natstream");
 
 /// A run that is expected to exit on its own. The deadline is a backstop: a
 /// configuration that was supposed to be refused would otherwise sit in the

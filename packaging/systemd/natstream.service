@@ -1,13 +1,13 @@
 [Unit]
 Description=conntrack NAT event IPFIX / NetFlow v9 exporter
-Documentation=file:/usr/share/doc/conntrack-exporter/README.md
+Documentation=file:/usr/share/doc/natstream/README.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/default/conntrack-exporter
-ExecStart=/usr/sbin/conntrack_exporter --collector ${COLLECTOR} $EXPORTER_OPTS
+EnvironmentFile=/etc/default/natstream
+ExecStart=/usr/sbin/natstream --collector ${COLLECTOR} $EXPORTER_OPTS
 
 # Run in the foreground and let journald take stderr. The daemon's own
 # --daemon supervisor exists for init systems that cannot do this, and would

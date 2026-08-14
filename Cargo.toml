@@ -1,8 +1,10 @@
 [package]
-name = "conntrack_exporter"
+name = "natstream"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+description = "Exports Linux conntrack NAT events as IPFIX or NetFlow v9 flow records"
+repository = "https://github.com/FastNetMon/NatStream"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

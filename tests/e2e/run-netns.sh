@@ -68,7 +68,7 @@ find_exporter() {
     fi
 
     for profile in debug release; do
-        local candidate="$ROOT/target/$profile/conntrack_exporter"
+        local candidate="$ROOT/target/$profile/natstream"
         [[ -x "$candidate" ]] && { echo "$candidate"; return; }
     done
 
@@ -112,7 +112,7 @@ main() {
     if (( throughput )); then
         # Prefer the release build: a debug one drops several times more and
         # says nothing useful about what the daemon can do.
-        local release="$ROOT/target/release/conntrack_exporter"
+        local release="$ROOT/target/release/natstream"
         [[ -z "${EXPORTER_BIN:-}" && -x "$release" ]] && exporter="$release"
         run_throughput "$exporter" "$@"
         return

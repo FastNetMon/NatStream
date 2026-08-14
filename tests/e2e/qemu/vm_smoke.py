@@ -1,7 +1,7 @@
 """Package smoke test, run inside the VM.
 
 Where the namespace test runs the binary directly, this one runs the service as
-an operator would get it: the .deb installed, `/etc/default/conntrack-exporter`
+an operator would get it: the .deb installed, `/etc/default/natstream`
 edited, and `systemctl start` from there. That makes the unit file the thing
 under test — in particular the claim that the exporter needs no root, only
 CAP_NET_ADMIN — which nothing outside a real init system can check.
@@ -27,8 +27,8 @@ from natflow import (  # noqa: E402
     verify_export,
 )
 
-SERVICE = "conntrack-exporter.service"
-DEFAULTS = "/etc/default/conntrack-exporter"
+SERVICE = "natstream.service"
+DEFAULTS = "/etc/default/natstream"
 
 # CAP_NET_ADMIN is capability 12; the unit grants this one and nothing else.
 CAP_NET_ADMIN = 12
@@ -60,8 +60,8 @@ def journal():
 def verify_package():
     """The paths and the install-time behaviour the README documents."""
     for path in (
-        "/usr/sbin/conntrack_exporter",
-        "/lib/systemd/system/conntrack-exporter.service",
+        "/usr/sbin/natstream",
+        "/lib/systemd/system/natstream.service",
         DEFAULTS,
     ):
         check(os.path.exists(path), f"the package did not install {path}")

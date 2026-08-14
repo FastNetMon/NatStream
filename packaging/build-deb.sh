@@ -7,10 +7,10 @@ set -euo pipefail
 : "${OUT_DIR:=/out}"
 : "${DIST_TAG:?DIST_TAG must be set (e.g. deb13, ubuntu24.04)}"
 : "${DEB_REVISION:=1}"
-: "${MAINTAINER:=conntrack_exporter maintainers <root@localhost>}"
+: "${MAINTAINER:=natstream maintainers <root@localhost>}"
 
-PKG=conntrack-exporter
-BIN=conntrack_exporter
+PKG=natstream
+BIN=natstream
 
 version=$(awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' "${SRC_DIR}/Cargo.toml")
 [ -n "${version}" ] || { echo "could not read version from Cargo.toml" >&2; exit 1; }

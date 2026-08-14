@@ -195,7 +195,7 @@ def main():
 
     if "debug" in os.path.normpath(args.exporter).split(os.sep):
         print("warning: this is a debug build; it drops several times more than\n"
-              "         a release build. Use target/release/conntrack_exporter.\n",
+              "         a release build. Use target/release/natstream.\n",
               file=sys.stderr, flush=True)
 
     setup_nat()

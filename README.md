@@ -1,8 +1,10 @@
-# conntrack_exporter
+# NatStream
 
-`conntrack_exporter` is a Linux daemon that exports conntrack NAT events as IPFIX (RFC 7011) or NetFlow v9 (RFC 3954) records over UDP.
+NatStream is a Linux daemon that exports conntrack NAT events as IPFIX (RFC 7011) or NetFlow v9 (RFC 3954) records over UDP.
 
 It listens to netlink conntrack notifications, extracts NAT-relevant flow fields, and sends them as flow records to a configured collector.
+
+Upstream: <https://github.com/FastNetMon/NatStream>
 
 ## What it does
 
@@ -23,9 +25,9 @@ container based on that distribution. No build tooling is needed on the host
 beyond Docker.
 
 ```bash
-./build.sh trixie      # Debian 13        -> dist/conntrack-exporter_*~deb13_*.deb
-./build.sh 24.04       # Ubuntu 24.04 LTS -> dist/conntrack-exporter_*~ubuntu24.04_*.deb
-./build.sh 26.04       # Ubuntu 26.04 LTS -> dist/conntrack-exporter_*~ubuntu26.04_*.deb
+./build.sh trixie      # Debian 13        -> dist/natstream_*~deb13_*.deb
+./build.sh 24.04       # Ubuntu 24.04 LTS -> dist/natstream_*~ubuntu24.04_*.deb
+./build.sh 26.04       # Ubuntu 26.04 LTS -> dist/natstream_*~ubuntu26.04_*.deb
 ./build.sh all         # all three
 ```
 
@@ -44,21 +46,21 @@ Override the packaging metadata with `MAINTAINER=`, `DEB_REVISION=` and
 
 | Path | |
 |---|---|
-| `/usr/sbin/conntrack_exporter` | the daemon |
-| `/lib/systemd/system/conntrack-exporter.service` | the service unit |
-| `/etc/default/conntrack-exporter` | configuration (a dpkg conffile) |
+| `/usr/sbin/natstream` | the daemon |
+| `/lib/systemd/system/natstream.service` | the service unit |
+| `/etc/default/natstream` | configuration (a dpkg conffile) |
 
 Installing does **not** enable or start the service, because it has no useful
 default collector and would only produce a restart loop. Configure it first:
 
 ```bash
-sudo dpkg -i conntrack-exporter_0.1.0-1~deb13_amd64.deb
-sudoedit /etc/default/conntrack-exporter        # set COLLECTOR=ip:port
-sudo systemctl enable --now conntrack-exporter.service
-journalctl -u conntrack-exporter -f
+sudo dpkg -i natstream_0.1.0-1~deb13_amd64.deb
+sudoedit /etc/default/natstream        # set COLLECTOR=ip:port
+sudo systemctl enable --now natstream.service
+journalctl -u natstream -f
 ```
 
-`/etc/default/conntrack-exporter` holds the collector endpoint and any extra
+`/etc/default/natstream` holds the collector endpoint and any extra
 flags:
 
 ```sh
@@ -110,7 +112,7 @@ cargo fmt --check       # formatting
 cargo clippy            # lints
 ```
 
-Binary output is `target/debug/conntrack_exporter` or `target/release/conntrack_exporter`.
+Binary output is `target/debug/natstream` or `target/release/natstream`.
 
 Clippy runs at `pedantic`, set in `Cargo.toml` rather than passed on the command
 line, so a local `cargo clippy` checks exactly what CI does. The casts that a
@@ -231,32 +233,32 @@ about the exporter.
 ## Run
 
 ```bash
-sudo ./target/release/conntrack_exporter --collector <IP>:<port>
+sudo ./target/release/natstream --collector <IP>:<port>
 ```
 
 Examples:
 
 ```bash
 # Basic foreground mode
-sudo ./target/release/conntrack_exporter --collector 203.0.113.10:4739
+sudo ./target/release/natstream --collector 203.0.113.10:4739
 
 # Override buffers and domain id
-sudo ./target/release/conntrack_exporter \
+sudo ./target/release/natstream \
   --collector 203.0.113.10:4739 \
   --recv-buf 8388608 \
   --send-buf 8388608 \
   --domain-id 100
 
 # NetFlow v9 to a collector that only decodes the base field registry
-sudo ./target/release/conntrack_exporter \
+sudo ./target/release/natstream \
   --collector 203.0.113.10:2055 \
   --protocol netflow9 \
   --profile flow-only \
   --counter-width 4
 
 # Run with self-supervision, a log file and verbose logs
-sudo ./target/release/conntrack_exporter --collector 203.0.113.10:4739 \
-  --daemon --log-file /var/log/conntrack_exporter.log -v
+sudo ./target/release/natstream --collector 203.0.113.10:4739 \
+  --daemon --log-file /var/log/natstream.log -v
 ```
 
 Under systemd, prefer `Type=simple` without `--daemon` and let journald capture

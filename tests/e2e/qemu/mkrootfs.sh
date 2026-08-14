@@ -38,7 +38,7 @@ dpkg -i "${deb}"
 # The README promises a fresh install leaves the service alone, because it has
 # no collector yet and would only produce a restart loop. If that ever changed,
 # the VM would start exporting before the test configured it.
-if [ -e /etc/systemd/system/multi-user.target.wants/conntrack-exporter.service ]; then
+if [ -e /etc/systemd/system/multi-user.target.wants/natstream.service ]; then
     echo "the package enabled the service on install; it must not" >&2
     exit 1
 fi
@@ -63,11 +63,11 @@ install -d -m 0755 "${ROOTFS}/opt/smoke"
 install -m 0644 "${INPUT}"/harness/*.py "${ROOTFS}/opt/smoke/"
 install -m 0755 "${INPUT}/harness/run.sh" "${ROOTFS}/opt/smoke/run.sh"
 install -m 0644 "${INPUT}/harness/smoke.service" \
-    "${ROOTFS}/etc/systemd/system/conntrack-exporter-smoke.service"
+    "${ROOTFS}/etc/systemd/system/natstream-smoke.service"
 
 # Start the smoke test once the system is up.
-ln -sf ../conntrack-exporter-smoke.service \
-    "${ROOTFS}/etc/systemd/system/multi-user.target.wants/conntrack-exporter-smoke.service"
+ln -sf ../natstream-smoke.service \
+    "${ROOTFS}/etc/systemd/system/multi-user.target.wants/natstream-smoke.service"
 
 # Nothing logs in; the console belongs to the test output.
 rm -f "${ROOTFS}/etc/systemd/system/getty.target.wants/"* 2>/dev/null || true

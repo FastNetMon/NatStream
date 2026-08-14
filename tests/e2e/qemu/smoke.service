@@ -1,5 +1,5 @@
 [Unit]
-Description=conntrack-exporter package smoke test
+Description=natstream package smoke test
 # Ordered after the boot has settled, so the test starts the service under the
 # same conditions an operator would.
 After=multi-user.target

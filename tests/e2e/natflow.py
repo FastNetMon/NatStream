@@ -27,7 +27,7 @@ REAL_PORT = 19999
 COLLECTOR_HOST = "127.0.0.1"
 COLLECTOR_PORT = 4739
 
-PAYLOAD = b"conntrack-exporter-e2e"
+PAYLOAD = b"natstream-e2e"
 REPLY = b"reply-from-the-server"
 
 # An IPv4 header and a UDP header on top of the payload.

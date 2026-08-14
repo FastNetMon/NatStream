@@ -37,7 +37,7 @@ fn every_configuration_exports_real_conntrack_nat_events() {
         .arg("--all")
         // The binary cargo just built for this test run, rather than whatever
         // happens to be sitting in target/.
-        .env("EXPORTER_BIN", env!("CARGO_BIN_EXE_conntrack_exporter"))
+        .env("EXPORTER_BIN", env!("CARGO_BIN_EXE_natstream"))
         .output()
         .expect("failed to run the end-to-end harness");
 

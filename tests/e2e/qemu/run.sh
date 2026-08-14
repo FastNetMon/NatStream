@@ -7,7 +7,7 @@
 
 readonly RESULT_MARKER="SMOKE-RESULT"
 
-echo "=================== conntrack-exporter package smoke test ==================="
+echo "=================== natstream package smoke test ==================="
 
 python3 /opt/smoke/vm_smoke.py
 status=$?
@@ -17,7 +17,7 @@ if [ ${status} -eq 0 ]; then
 else
     echo "${RESULT_MARKER}: FAIL (exit ${status})"
     # Whatever the assertions did not already print.
-    journalctl -u conntrack-exporter.service --no-pager -n 100 2>/dev/null
+    journalctl -u natstream.service --no-pager -n 100 2>/dev/null
 fi
 
 echo "============================================================================"

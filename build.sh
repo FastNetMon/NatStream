@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 
 RUST_VERSION="${RUST_VERSION:-1.97.1}"
 DEB_REVISION="${DEB_REVISION:-1}"
-IMAGE_PREFIX="${IMAGE_PREFIX:-conntrack-exporter-builder}"
+IMAGE_PREFIX="${IMAGE_PREFIX:-natstream-builder}"
 
 TARGETS="trixie 24.04 26.04"
 
@@ -22,9 +22,9 @@ Builds a Debian package for the given target inside a Docker container based on
 that distribution. Packages are written to dist/.
 
 Targets:
-  trixie          Debian 13 (trixie)      -> conntrack-exporter_*~deb13_*.deb
-  24.04 | noble   Ubuntu 24.04 LTS        -> conntrack-exporter_*~ubuntu24.04_*.deb
-  26.04           Ubuntu 26.04 LTS        -> conntrack-exporter_*~ubuntu26.04_*.deb
+  trixie          Debian 13 (trixie)      -> natstream_*~deb13_*.deb
+  24.04 | noble   Ubuntu 24.04 LTS        -> natstream_*~ubuntu24.04_*.deb
+  26.04           Ubuntu 26.04 LTS        -> natstream_*~ubuntu26.04_*.deb
   all             every target above
 
 Environment:
@@ -61,7 +61,7 @@ maintainer() {
     if [ -n "${name}" ] && [ -n "${email}" ]; then
         printf '%s <%s>' "${name}" "${email}"
     else
-        printf 'conntrack_exporter maintainers <root@localhost>'
+        printf 'natstream maintainers <root@localhost>'
     fi
 }
 

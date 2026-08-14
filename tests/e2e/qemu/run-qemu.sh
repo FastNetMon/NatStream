@@ -64,11 +64,11 @@ find_deb() {
     # The guest is Debian trixie, so it needs the package built for trixie:
     # the whole point of the per-distro build is that the libc differs.
     local candidate
-    candidate=$(ls -t "$ROOT"/dist/conntrack-exporter_*deb13*.deb 2>/dev/null | head -1)
+    candidate=$(ls -t "$ROOT"/dist/natstream_*deb13*.deb 2>/dev/null | head -1)
     if [[ -z "$candidate" ]]; then
         log "no trixie package in dist/, building one"
         "$ROOT/build.sh" trixie >&2
-        candidate=$(ls -t "$ROOT"/dist/conntrack-exporter_*deb13*.deb 2>/dev/null | head -1)
+        candidate=$(ls -t "$ROOT"/dist/natstream_*deb13*.deb 2>/dev/null | head -1)
     fi
     [[ -n "$candidate" ]] || die "no package to test; run ./build.sh trixie"
     echo "$candidate"

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-PKG=conntrack-exporter
+PKG=natstream
 
 if [ "$1" = "configure" ]; then
     if [ -d /run/systemd/system ]; then

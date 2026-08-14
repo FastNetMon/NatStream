@@ -1,4 +1,4 @@
-# Configuration for conntrack-exporter.service
+# Configuration for natstream.service
 #
 # The service will not start until COLLECTOR is set, because there is no
 # sensible default for where your flow records should go.
@@ -19,7 +19,7 @@ COLLECTOR=
 #   --no-sysctl                      do not touch the nf_conntrack sysctls
 #   -v                               debug logging
 #
-# Run `conntrack_exporter --help` for the full list.
+# Run `natstream --help` for the full list.
 #
 # Example:
 #   EXPORTER_OPTS=--protocol netflow9 --profile nat-source --counter-width 4

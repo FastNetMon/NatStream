@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-PKG=conntrack-exporter
+PKG=natstream
 
 # On upgrade the new postinst restarts it; only stop for a real removal.
 if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
