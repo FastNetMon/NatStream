@@ -12,8 +12,9 @@ env:
 jobs:
   # Everything that needs nothing from the kernel: the unit tests, and the
   # integration tests that drive the real binary's configuration handling.
+  # Formatting and lints have workflows of their own.
   test:
-    name: build, lint and test
+    name: build and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +23,6 @@ jobs:
         run: |
           rustup update stable --no-self-update
           rustup default stable
-          rustup component add clippy rustfmt
           rustc --version
 
       - name: Cache cargo
@@ -35,16 +35,8 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
-      - name: Format
-        # The hand-laid-out tables — the profile field lists, the netlink test
-        # fixtures — carry #[rustfmt::skip], so this checks everything else.
-        run: cargo fmt --check
-
       - name: Build
         run: cargo build --locked --all-targets
-
-      - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --locked

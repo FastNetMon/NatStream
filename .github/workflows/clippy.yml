@@ -1,0 +1,39 @@
+name: clippy
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add clippy
+          cargo clippy --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: clippy-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: clippy-${{ runner.os }}-
+
+      # The lint level lives in Cargo.toml ([lints.clippy] pedantic), so this
+      # checks exactly what `cargo clippy` checks on a developer's machine.
+      # --all-targets covers the tests too, which is where most code now is.
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings

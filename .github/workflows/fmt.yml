@@ -1,0 +1,30 @@
+name: fmt
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add rustfmt
+          cargo fmt --version
+
+      # The hand-laid-out tables — the profile field lists in template.rs, the
+      # netlink message fixtures in the parser tests — carry #[rustfmt::skip],
+      # because rustfmt splits them in a way that loses the alignment doing the
+      # explaining. Everything else is rustfmt's.
+      - name: Check formatting
+        run: cargo fmt --check

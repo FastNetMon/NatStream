@@ -106,9 +106,17 @@ net-namespace-wide and are not restored on exit.
 cargo build             # debug
 cargo build --release   # optimized release
 cargo test              # unit and integration tests
+cargo fmt --check       # formatting
+cargo clippy            # lints
 ```
 
 Binary output is `target/debug/conntrack_exporter` or `target/release/conntrack_exporter`.
+
+Clippy runs at `pedantic`, set in `Cargo.toml` rather than passed on the command
+line, so a local `cargo clippy` checks exactly what CI does. The casts that a
+wire format necessarily makes are annotated where they are, with the bound that
+makes each one safe; the few places where the layout of the source is doing the
+explaining carry `#[rustfmt::skip]`.
 
 ## Testing
 
