@@ -1,6 +1,6 @@
 [package]
 name = "natstream"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Exports Linux conntrack NAT events as IPFIX or NetFlow v9 flow records"
