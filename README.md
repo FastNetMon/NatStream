@@ -8,9 +8,14 @@ Upstream: <https://github.com/FastNetMon/NatStream>
 
 ## Install (Debian / Ubuntu)
 
-`./build.sh` produces a `.deb` for a target distribution, built inside a Docker
-container based on that distribution. No build tooling is needed on the host
-beyond Docker.
+Every release publishes a `.deb` per target distribution, with a `SHA256SUMS`
+alongside them:
+<https://github.com/FastNetMon/NatStream/releases/latest>.
+
+To build one yourself, `./build.sh` produces a `.deb` for a target
+distribution, inside a Docker container based on that distribution. No build
+tooling is needed on the host beyond Docker. This is the same script the
+release workflow runs, so a locally built package is the packaged one.
 
 ```bash
 ./build.sh trixie      # Debian 13        -> dist/natstream_*~deb13_*.deb
@@ -107,6 +112,34 @@ treats warnings as errors with `cargo clippy --all-targets -- -D warnings`. The
 casts that a wire format necessarily makes are annotated where they are, with
 the bound that makes each one safe; the few places where the layout of the
 source is doing the explaining carry `#[rustfmt::skip]`.
+
+## Releasing
+
+A release is a tag. `.github/workflows/release.yml` builds one `.deb` per
+target with `./build.sh`, then publishes them to a GitHub release:
+
+```bash
+# Cargo.toml's version must already say 0.2.0 on the commit being tagged.
+git tag -a v0.2.0 -m 'NatStream 0.2.0'
+git push origin v0.2.0
+```
+
+The workflow refuses to build if the tag and `Cargo.toml` disagree, so a
+mismatch costs a failed job rather than a wrong package. A version with a
+suffix (`v0.2.0-rc1`) is published as a pre-release.
+
+Before publishing, the Ubuntu 24.04 package is installed and purged on the
+runner, which is the same distribution: a maintainer script that fails, a
+binary that will not run, or an install that enables the service fails the
+build. The release carries the packages and a `SHA256SUMS` over them.
+
+Running the workflow by hand from the Actions tab builds all three packages and
+leaves them as workflow artifacts without publishing anything, which is how to
+exercise the packaging path without spending a tag.
+
+Set the `DEB_MAINTAINER` repository variable to a real `Name <email>`;
+without it the packages carry the placeholder maintainer from
+`packaging/build-deb.sh`.
 
 ## Benchmarks
 

@@ -1,0 +1,179 @@
+name: release
+
+# Publishes a GitHub release with a .deb per target distribution.
+#
+# Pushing a v* tag builds the packages and publishes them. A manual run builds
+# the same packages and leaves them as workflow artifacts without publishing,
+# which is how the packaging path gets exercised without spending a tag.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      deb_revision:
+        description: 'Debian revision (the -N in 0.1.0-N~deb13)'
+        required: false
+        default: '1'
+
+# The workflow only reads the repository; the publish job asks for write.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The Maintainer field of every package built here. Set the DEB_MAINTAINER
+  # repository variable to a real "Name <email>"; without it the packages carry
+  # the placeholder from packaging/build-deb.sh.
+  MAINTAINER: ${{ vars.DEB_MAINTAINER }}
+  DEB_REVISION: ${{ inputs.deb_revision || '1' }}
+
+# One release at a time, and never cancel a run that may already have published.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # A tag that disagrees with Cargo.toml would produce packages whose version
+  # is not the one being released, so stop before anything is built.
+  version:
+    name: check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare the tag with Cargo.toml
+        id: check
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' Cargo.toml)
+          [ -n "${version}" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
+
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [ "${tag_version}" != "${version}" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
+              exit 1
+            fi
+          fi
+
+          # 0.2.0-rc1 and friends are published as pre-releases.
+          case "${version}" in
+            *-*) prerelease=true ;;
+            *)   prerelease=false ;;
+          esac
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "natstream ${version} (prerelease=${prerelease}, revision=${DEB_REVISION})"
+
+  # One job per target distribution, using the same ./build.sh a developer runs
+  # locally, so there is no second packaging path that can drift.
+  package:
+    name: ${{ matrix.target }}
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: trixie
+            dist_tag: deb13
+          - target: '24.04'
+            dist_tag: ubuntu24.04
+          - target: '26.04'
+            dist_tag: ubuntu26.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the package
+        run: ./build.sh ${{ matrix.target }}
+
+      # The runner is Ubuntu 24.04, so it can install that target's package for
+      # real: this catches a broken maintainer script or a binary linked against
+      # a glibc the distro does not have, which dpkg-deb --info would not.
+      - name: Install and remove it
+        if: matrix.dist_tag == 'ubuntu24.04'
+        run: |
+          set -euo pipefail
+          deb=$(ls dist/natstream_*~ubuntu24.04_*.deb)
+          sudo dpkg -i "${deb}"
+          /usr/sbin/natstream --version
+          # A fresh install must leave the service alone; enabling it without a
+          # collector configured would only produce a restart loop.
+          if systemctl is-enabled --quiet natstream.service; then
+            echo "::error::a fresh install enabled natstream.service"
+            exit 1
+          fi
+          sudo dpkg --purge natstream
+          test ! -e /usr/sbin/natstream
+          test ! -e /etc/default/natstream
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.dist_tag }}
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: publish release
+    needs: [version, package]
+    # Only a tag publishes; a manual run stops after the packages are built.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: deb-*
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum -- *.deb | tee SHA256SUMS
+
+      # The hand-written part of the notes; gh appends the generated commit and
+      # contributor list to it.
+      - name: Release notes
+        run: |
+          cat > notes.md <<'NOTES'
+          ## Packages
+
+          | Distribution | Package |
+          |---|---|
+          | Debian 13 (trixie) | `natstream_*~deb13_amd64.deb` |
+          | Ubuntu 24.04 LTS | `natstream_*~ubuntu24.04_amd64.deb` |
+          | Ubuntu 26.04 LTS | `natstream_*~ubuntu26.04_amd64.deb` |
+
+          Each is built inside a container based on its own distribution, so it
+          links that distribution's glibc. `SHA256SUMS` covers all of them.
+
+          Installing does not enable the service: set `COLLECTOR` in
+          `/etc/default/natstream` first, then
+          `systemctl enable --now natstream.service`.
+          NOTES
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          args=(
+            --repo "${GITHUB_REPOSITORY}"
+            --title "NatStream ${VERSION}"
+            --notes-file notes.md
+            --generate-notes
+          )
+          if [ "${PRERELEASE}" = true ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${GITHUB_REF_NAME}" "${args[@]}" dist/*.deb dist/SHA256SUMS
