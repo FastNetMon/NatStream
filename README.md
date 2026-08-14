@@ -293,4 +293,5 @@ events and hold the flow's totals on DELETE.
 
 ## License
 
-No license file is present in this repository yet.
+Apache License 2.0. See [LICENSE](LICENSE), or
+<https://www.apache.org/licenses/LICENSE-2.0>.

@@ -39,6 +39,8 @@ strip --strip-unneeded "${stage}/usr/sbin/${BIN}"
 install -D -m 0644 "packaging/systemd/${PKG}.service"       "${stage}/lib/systemd/system/${PKG}.service"
 install -D -m 0644 "packaging/default/${PKG}"               "${stage}/etc/default/${PKG}"
 install -D -m 0644 README.md                                "${stage}/usr/share/doc/${PKG}/README.md"
+# Debian expects a package's licence at this path.
+install -D -m 0644 LICENSE                                  "${stage}/usr/share/doc/${PKG}/copyright"
 
 install -d -m 0755 "${stage}/DEBIAN"
 for script in postinst prerm postrm; do

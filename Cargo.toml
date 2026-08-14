@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 description = "Exports Linux conntrack NAT events as IPFIX or NetFlow v9 flow records"
 repository = "https://github.com/FastNetMon/NatStream"
+license = "Apache-2.0"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
