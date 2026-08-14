@@ -171,10 +171,20 @@ jobs:
           pattern: deb-*
           merge-multiple: true
 
+      # GitHub rewrites ~ to . in an uploaded asset's filename, so the packages
+      # are renamed to the names they will actually carry on the release before
+      # they are checksummed. Otherwise SHA256SUMS names files that cannot be
+      # downloaded and `sha256sum -c` fails on every line. The ~ stays where it
+      # has meaning, in the package's own Version field, which dpkg reads from
+      # the control file and not from the filename.
       - name: Checksums
         working-directory: dist
         run: |
           set -euo pipefail
+          for deb in *.deb; do
+            sanitized="${deb//\~/.}"
+            [ "${deb}" = "${sanitized}" ] || mv -- "${deb}" "${sanitized}"
+          done
           sha256sum -- *.deb | tee SHA256SUMS
 
       # The hand-written part of the notes; gh appends the generated commit and
