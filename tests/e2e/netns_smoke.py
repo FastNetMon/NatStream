@@ -35,8 +35,12 @@ from natflow import (  # noqa: E402
 class Exporter:
     """The exporter under test, with its log captured for assertions."""
 
-    def __init__(self, binary, collector, extra_args):
-        self.command = [binary, "--collector", collector, "--verbose", *extra_args]
+    def __init__(self, binary, collector, extra_args, verbose=True):
+        # Debug logging formats and writes a line per event. That is what the
+        # smoke test reads its assertions from, and exactly what a throughput
+        # measurement must not pay for.
+        verbosity = ["--verbose"] if verbose else []
+        self.command = [binary, "--collector", collector, *verbosity, *extra_args]
         self.process = None
         self.log = []
         self._reader = None

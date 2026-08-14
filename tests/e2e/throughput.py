@@ -29,6 +29,7 @@ what `benches/` is for.
 """
 
 import argparse
+import multiprocessing
 import os
 import socket
 import sys
@@ -54,7 +55,36 @@ from natflow import (  # noqa: E402
 from netns_smoke import Exporter  # noqa: E402
 
 
-def generate_load(sessions, duration):
+def worker_source_address(worker):
+    """A source address of this worker's own.
+
+    Ephemeral ports run out at roughly 28,000 per source address, which caps
+    how many distinct conntrack entries one worker can make. Giving each its
+    own address multiplies both the ceiling and the rate.
+    """
+    return f"10.9.9.{20 + worker}"
+
+
+def send_sessions(worker, sessions, duration, results):
+    """Open a NAT'd session per ephemeral port, as fast as this process can."""
+    source = worker_source_address(worker) if worker is not None else CLIENT_IP
+    created = 0
+    deadline = time.monotonic() + duration
+    while created < sessions and time.monotonic() < deadline:
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            client.bind((source, 0))
+            client.sendto(b"x", (VIRTUAL_IP, VIRTUAL_PORT))
+            created += 1
+        except OSError:
+            # Ephemeral ports exhausted, or the socket table is full.
+            break
+        finally:
+            client.close()
+    results.put(created)
+
+
+def generate_load(sessions, duration, workers):
     """Create as many NAT'd sessions as we can, and return how many.
 
     Each one is a datagram to the virtual address from a fresh source port,
@@ -80,26 +110,45 @@ def generate_load(sessions, duration):
     drainer = threading.Thread(target=drain, daemon=True)
     drainer.start()
 
-    created = 0
-    deadline = time.monotonic() + duration
     try:
-        while created < sessions and time.monotonic() < deadline:
-            client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                client.bind((CLIENT_IP, 0))
-                client.sendto(b"x", (VIRTUAL_IP, VIRTUAL_PORT))
-                created += 1
-            except OSError:
-                # Ephemeral ports exhausted, or the socket table is full.
-                time.sleep(0.01)
-            finally:
-                client.close()
+        if workers <= 1:
+            results = multiprocessing.Queue()
+            send_sessions(None, sessions, duration, results)
+            return results.get()
+
+        for worker in range(workers):
+            run("ip", "addr", "add", f"{worker_source_address(worker)}/24",
+                "dev", "lo", check_exit=False)
+
+        results = multiprocessing.Queue()
+        each = sessions // workers
+        processes = [
+            multiprocessing.Process(target=send_sessions,
+                                    args=(worker, each, duration, results))
+            for worker in range(workers)
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=duration + 30)
+
+        return sum(results.get() for _ in processes)
     finally:
         stop.set()
         drainer.join(timeout=1)
         server.close()
 
-    return created
+
+def process_cpu_seconds(pid):
+    """User + system CPU the process has burned, in seconds.
+
+    Fields 14 and 15 of /proc/PID/stat, in clock ticks. The comm field can
+    contain spaces and brackets, so the split starts after it.
+    """
+    with open(f"/proc/{pid}/stat") as handle:
+        fields = handle.read().rpartition(")")[2].split()
+    ticks = int(fields[11]) + int(fields[12])  # utime, stime
+    return ticks / os.sysconf("SC_CLK_TCK")
 
 
 def conntrack_count():
@@ -134,6 +183,14 @@ def main():
     parser.add_argument("--protocol", default="ipfix", choices=["ipfix", "netflow9"])
     parser.add_argument("--profile", default="full",
                         choices=["full", "nat-source", "flow-only"])
+    parser.add_argument("--verbose", action="store_true",
+                        help="run the exporter with debug logging, which costs "
+                             "a formatted line per event")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="parallel load generators, each with its own source "
+                             "address (default 1)")
+    parser.add_argument("--recv-buf", type=int, default=None,
+                        help="netlink receive buffer in bytes")
     args = parser.parse_args()
 
     if "debug" in os.path.normpath(args.exporter).split(os.sep):
@@ -144,11 +201,14 @@ def main():
     setup_nat()
 
     extra = ["--protocol", args.protocol, "--profile", args.profile]
+    if args.recv_buf is not None:
+        extra += ["--recv-buf", str(args.recv_buf)]
     collector_address = f"{COLLECTOR_HOST}:{COLLECTOR_PORT}"
 
     with Collector(COLLECTOR_HOST, COLLECTOR_PORT,
                    receive_buffer=64 * 1024 * 1024) as collector, \
-            Exporter(args.exporter, collector_address, extra) as exporter:
+            Exporter(args.exporter, collector_address, extra,
+                     verbose=args.verbose) as exporter:
 
         if not exporter.wait_for_log("Listening for conntrack NAT events", 15):
             raise Failure("the exporter never reached its event loop:\n"
@@ -165,8 +225,9 @@ def main():
         receiver = threading.Thread(target=collect, daemon=True)
         receiver.start()
 
+        cpu_before = process_cpu_seconds(exporter.process.pid)
         started = time.monotonic()
-        sent = generate_load(args.sessions, args.duration)
+        sent = generate_load(args.sessions, args.duration, args.workers)
         creation_seconds = time.monotonic() - started
 
         # What the kernel actually tracked. Ephemeral ports get reused, and a
@@ -182,6 +243,7 @@ def main():
         time.sleep(args.settle)
         stop_receiving.set()
         receiver.join(timeout=5)
+        cpu_used = process_cpu_seconds(exporter.process.pid) - cpu_before
 
         offered = tracked * 2  # one CREATE and one DELETE each
         received = len(collector.records)
@@ -202,6 +264,11 @@ def main():
         kept = offered - netlink_drops
         if offered:
             print(f"  ingested           {kept / offered * 100:>9.1f}%  of what was offered")
+        handled = offered - netlink_drops
+        print(f"  exporter cpu       {cpu_used:>10.2f}s")
+        if handled:
+            print(f"  cpu per event      {cpu_used / handled * 1e9:>10.0f}ns  "
+                  f"(decode+encode alone is ~85ns, per benches/)")
         print()
         print("  --- what this test collector saw ---")
         print(f"  records received   {received:>10,}")
