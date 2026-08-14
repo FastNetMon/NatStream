@@ -9,10 +9,9 @@
 //!     cargo bench -- decode                # one group
 //!     ./benches/compare.sh --save before   # the regression workflow
 //!
-//! What this deliberately does not measure is the `recvfrom` itself: its cost
-//! is the kernel's, not ours, and it cannot be reproduced without a live
-//! conntrack. `tests/e2e/throughput.py` covers that end of it against a real
-//! kernel.
+//! What this deliberately does not measure is the `recvmmsg` receive itself:
+//! its cost includes the kernel and cannot be reproduced without a live
+//! conntrack. `tests/e2e/throughput.py` covers that end against a real kernel.
 
 use std::hint::black_box;
 
@@ -108,7 +107,7 @@ fn plain_event(index: u32) -> Vec<u8> {
 }
 
 /// One recv buffer's worth. The kernel batches whatever is queued into a single
-/// datagram, so a busy exporter sees many messages per `recvfrom`, not one.
+/// datagram, so a busy exporter sees many messages per receive syscall, not one.
 ///
 /// `nat_in` gives the proportion that are NAT sessions: 1 for all of them, 4
 /// for one in four, and `None` for none.

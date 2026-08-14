@@ -1,8 +1,8 @@
 //! Conntrack NAT event export: the parts the daemon is assembled from.
 //!
-//! The daemon in `main.rs` is a thin wrapper over these modules — it opens the
-//! sockets, runs the event loop and supervises itself, and everything it does
-//! in between is here.
+//! The daemon in `main.rs` handles process supervision and the event loop; these
+//! modules provide the parsing, encoding, socket, and signal-handling pieces it
+//! assembles.
 //!
 //! They live in a library target rather than in the binary so that things
 //! outside the daemon can link to them. The benchmarks in `benches/` are the

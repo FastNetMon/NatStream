@@ -102,11 +102,11 @@ cargo clippy            # lints
 
 Binary output is `target/debug/natstream` or `target/release/natstream`.
 
-Clippy runs at `pedantic`, set in `Cargo.toml` rather than passed on the command
-line, so a local `cargo clippy` checks exactly what CI does. The casts that a
-wire format necessarily makes are annotated where they are, with the bound that
-makes each one safe; the few places where the layout of the source is doing the
-explaining carry `#[rustfmt::skip]`.
+Clippy's `pedantic` lint set lives in `Cargo.toml`. CI checks every target and
+treats warnings as errors with `cargo clippy --all-targets -- -D warnings`. The
+casts that a wire format necessarily makes are annotated where they are, with
+the bound that makes each one safe; the few places where the layout of the
+source is doing the explaining carry `#[rustfmt::skip]`.
 
 ## Benchmarks
 
@@ -122,8 +122,8 @@ Decoding is measured with all events translated, with one in four translated,
 and with none, because rejecting an event the exporter does not care about is
 the common case and the cheapest path through the parser.
 
-They deliberately do not measure the `recvfrom` itself: its cost is the
-kernel's, and it cannot be reproduced without a live conntrack.
+They deliberately do not measure the `recvmmsg` receive itself: its cost
+includes the kernel and cannot be reproduced without a live conntrack.
 
 ### Checking a change for regressions
 

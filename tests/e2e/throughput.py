@@ -267,8 +267,7 @@ def main():
         handled = offered - netlink_drops
         print(f"  exporter cpu       {cpu_used:>10.2f}s")
         if handled:
-            print(f"  cpu per event      {cpu_used / handled * 1e9:>10.0f}ns  "
-                  f"(decode+encode alone is ~85ns, per benches/)")
+            print(f"  cpu per event      {cpu_used / handled * 1e9:>10.0f}ns")
         print()
         print("  --- what this test collector saw ---")
         print(f"  records received   {received:>10,}")

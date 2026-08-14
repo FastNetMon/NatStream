@@ -14,8 +14,8 @@ log = "0.4"
 env_logger = "0.11"
 anyhow = "1"
 
-# Declared here rather than passed on the command line, so `cargo clippy` in a
-# terminal checks exactly what CI does.
+# Keep the project's lint set active for local and CI builds. CI additionally
+# checks every target and promotes warnings to errors.
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 
