@@ -149,6 +149,10 @@ impl Encoder {
 
     /// Finalize the message: fill in the header and the data set length.
     /// Returns the ready-to-send bytes and the number of records.
+    /// # Panics
+    ///
+    /// If a length outgrew the 16-bit field it is written into, which the
+    /// message budget makes impossible.
     pub fn finalize(&mut self) -> (&[u8], u32) {
         // Close the data set: pad it out if the protocol asks for aligned sets,
         // then patch its length, which includes that padding.

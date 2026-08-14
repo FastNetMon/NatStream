@@ -10,6 +10,7 @@
 #   ./tests/e2e/run-netns.sh                       # default configuration
 #   ./tests/e2e/run-netns.sh --all                 # every protocol and profile
 #   ./tests/e2e/run-netns.sh --protocol netflow9   # one specific configuration
+#   ./tests/e2e/run-netns.sh --throughput          # real-kernel ingest load test
 #
 # Exits 0 on success, 1 on failure, and 77 when the host cannot run the test at
 # all (the convention `cargo test` uses here to skip rather than fail).
@@ -19,6 +20,7 @@ set -euo pipefail
 readonly SKIP=77
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly SMOKE="$ROOT/tests/e2e/netns_smoke.py"
+readonly THROUGHPUT="$ROOT/tests/e2e/throughput.py"
 
 # A host that cannot provide the namespaces skips rather than fails — but in
 # CI, where the environment is supposed to be able to run this, a silent skip
@@ -82,13 +84,21 @@ run_case() {
         python3 "$SMOKE" --exporter "$exporter" "$@"
 }
 
+run_throughput() {
+    local exporter="$1"; shift
+    unshare --user --map-root-user --net -- \
+        python3 "$THROUGHPUT" --exporter "$exporter" "$@"
+}
+
 main() {
     local -a cases=()
     local all=0
+    local throughput=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --all) all=1; shift ;;
+            --throughput) throughput=1; shift ;;
             -h|--help) usage ;;
             *) break ;;
         esac
@@ -98,6 +108,15 @@ main() {
     local exporter
     exporter="$(find_exporter)"
     echo "exporter: $exporter" >&2
+
+    if (( throughput )); then
+        # Prefer the release build: a debug one drops several times more and
+        # says nothing useful about what the daemon can do.
+        local release="$ROOT/target/release/conntrack_exporter"
+        [[ -z "${EXPORTER_BIN:-}" && -x "$release" ]] && exporter="$release"
+        run_throughput "$exporter" "$@"
+        return
+    fi
 
     if (( all )); then
         cases=(

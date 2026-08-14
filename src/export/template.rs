@@ -280,6 +280,11 @@ impl CounterWidth {
         }
     }
 
+    /// The width an operator asked for on the command line.
+    ///
+    /// # Errors
+    ///
+    /// If `bytes` is neither 4 nor 8; no other width is defined.
     pub fn from_bytes(bytes: u8) -> Result<Self> {
         match bytes {
             4 => Ok(CounterWidth::Four),
@@ -319,6 +324,13 @@ pub const fn align_up(value: usize, alignment: usize) -> usize {
 }
 
 impl Template {
+    /// Resolve a profile against a counter width into the exact fields the
+    /// encoder writes and the template it advertises.
+    ///
+    /// # Errors
+    ///
+    /// If `template_id` is below 256, which is reserved for set identifiers, or
+    /// if one record plus its template could not fit in a single message.
     pub fn resolve(
         protocol: Protocol,
         profile: Profile,
@@ -405,6 +417,11 @@ impl Template {
         )
     }
 
+    /// How many fields the template advertises.
+    ///
+    /// # Panics
+    ///
+    /// If a profile ever held more than `u16::MAX` fields. The largest has 14.
     pub fn field_count(&self) -> u16 {
         u16::try_from(self.fields.len()).expect("a profile has a handful of fields")
     }

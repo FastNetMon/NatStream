@@ -1,8 +1,3 @@
-mod event;
-mod export;
-mod netlink;
-mod signals;
-
 use std::ffi::CString;
 use std::fs;
 use std::io;
@@ -16,10 +11,12 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use log::{debug, error, info, warn};
 
-use export::{CounterWidth, Encoder, Profile, Protocol, Template};
-use netlink::constants::{DEFAULT_RECV_BUF_SIZE, DEFAULT_SEND_BUF_SIZE, buffer_size, socklen};
-use netlink::{NetlinkSocket, parse_conntrack_messages};
-use signals::SignalFd;
+use conntrack_exporter::export::{self, CounterWidth, Encoder, Profile, Protocol, Template};
+use conntrack_exporter::netlink::constants::{
+    DEFAULT_RECV_BUF_SIZE, DEFAULT_SEND_BUF_SIZE, buffer_size, socklen,
+};
+use conntrack_exporter::netlink::{NetlinkSocket, parse_conntrack_messages};
+use conntrack_exporter::signals::{self, SignalFd};
 
 /// How long the supervisor waits for the worker to exit on its own after
 /// SIGTERM before escalating to SIGKILL.

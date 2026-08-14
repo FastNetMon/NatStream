@@ -22,6 +22,9 @@ pub struct SignalFd {
 impl SignalFd {
     /// Block `signals` for the calling process and return a descriptor that
     /// becomes readable when one of them is delivered.
+    /// # Errors
+    ///
+    /// If the signal mask cannot be applied, or the descriptor not created.
     pub fn new(signals: &[libc::c_int]) -> io::Result<Self> {
         let mut mask: libc::sigset_t = unsafe { mem::zeroed() };
         unsafe { libc::sigemptyset(&raw mut mask) };
@@ -48,6 +51,10 @@ impl SignalFd {
     }
 
     /// Drain every signal currently pending on the descriptor.
+    /// # Errors
+    ///
+    /// If reading the descriptor fails for a reason other than it being empty
+    /// or the read being interrupted, both of which are handled here.
     pub fn read_pending(&self) -> io::Result<Vec<libc::c_int>> {
         let mut signals = Vec::new();
         loop {
@@ -97,6 +104,9 @@ impl Drop for SignalFd {
 
 /// Restore an empty signal mask, undoing the blocking done by [`SignalFd::new`].
 /// A forked child inherits the parent's mask and needs its own disposition.
+/// # Errors
+///
+/// If the signal mask cannot be applied.
 pub fn unblock_all() -> io::Result<()> {
     let mut mask: libc::sigset_t = unsafe { mem::zeroed() };
     unsafe { libc::sigemptyset(&raw mut mask) };
@@ -107,6 +117,9 @@ pub fn unblock_all() -> io::Result<()> {
 }
 
 /// Wait for a single descriptor to become readable. A negative timeout blocks.
+/// # Errors
+///
+/// If `poll` fails, including with `EINTR`.
 pub fn poll_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
     let mut pfd = libc::pollfd {
         fd,

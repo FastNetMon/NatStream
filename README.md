@@ -173,6 +173,61 @@ is handy when pointing the exporter at something new:
 python3 tests/e2e/flowdecode.py --bind 127.0.0.1:4739
 ```
 
+## Benchmarks
+
+```bash
+cargo bench                  # everything
+cargo bench -- decode        # one group
+```
+
+The benchmarks measure the two steps that cost CPU — decoding a netlink
+datagram into conntrack events, and encoding those into export messages —
+separately and together, across every protocol, profile and counter width.
+Decoding is measured with all events translated, with one in four translated,
+and with none, because rejecting an event the exporter does not care about is
+the common case and the cheapest path through the parser.
+
+They deliberately do not measure the `recvfrom` itself: its cost is the
+kernel's, and it cannot be reproduced without a live conntrack.
+
+### Checking a change for regressions
+
+Criterion baselines make the before/after comparison a two-step affair. The
+gate is on the lower bound of the confidence interval, so a regression has to
+be one the statistics are confident about before it fails:
+
+```bash
+./benches/compare.sh --save before      # on the unchanged tree
+                                        # ...make the change...
+./benches/compare.sh --against before   # exits non-zero if anything got slower
+```
+
+`--threshold PCT` sets what counts as a regression (default 5%), `--filter EXPR`
+narrows it to some of the benchmarks, and `--list` shows the saved baselines.
+Results are only as steady as the machine underneath them; for numbers worth
+arguing over, pin the CPU governor to performance.
+
+### What it can take from a real kernel
+
+The microbenchmarks say how fast the code is, not whether the daemon keeps up
+with a kernel that is actually producing events. That needs the real thing:
+
+```bash
+cargo build --release
+./tests/e2e/run-netns.sh --throughput
+```
+
+It creates tens of thousands of NAT sessions in a namespace, tears them all
+down, and reports what was offered, what the kernel had to drop because the
+exporter did not drain its socket in time, and what the collector received.
+The netlink drop count is the one that answers the question — records received
+is a floor, since a Python collector on loopback is the slower end.
+
+Treat it as a sizing exercise rather than a regression gate: the load is an
+instantaneous burst, harsher than real traffic, and the result moves with the
+machine. Build for release first, or the number says more about `-O0` than
+about the exporter.
+
 ## Run
 
 ```bash

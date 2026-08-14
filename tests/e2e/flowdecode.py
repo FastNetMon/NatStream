@@ -262,12 +262,44 @@ def decode(datagram, templates=None):
 class Collector:
     """A UDP socket that decodes what it receives, keeping template state."""
 
-    def __init__(self, host="127.0.0.1", port=4739):
+    # Socket options Python's `socket` module does not name, from
+    # asm-generic/socket.h, plus the index of the drop counter in SO_MEMINFO.
+    SO_RCVBUFFORCE = 33
+    SO_MEMINFO = 55
+    SK_MEMINFO_VARS = 9
+    SK_MEMINFO_DROPS = 8
+
+    def __init__(self, host="127.0.0.1", port=4739, receive_buffer=None):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if receive_buffer is not None:
+            # Under load this collector is the slow end, and a datagram it
+            # fails to read is indistinguishable from one the exporter never
+            # sent. A large buffer, plus `dropped` below, keeps the two apart.
+            try:
+                self.socket.setsockopt(socket.SOL_SOCKET, self.SO_RCVBUFFORCE,
+                                       receive_buffer)
+            except OSError:
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF,
+                                       receive_buffer)
         self.socket.bind((host, port))
         self.templates = {}
         self.messages = []
+
+    @property
+    def dropped(self):
+        """Datagrams the kernel discarded because this socket was too slow.
+
+        Returns None where the counter is unavailable, so a caller can say so
+        rather than reporting a zero it did not measure.
+        """
+        try:
+            raw = self.socket.getsockopt(socket.SOL_SOCKET, self.SO_MEMINFO,
+                                         self.SK_MEMINFO_VARS * 4)
+        except OSError:
+            return None
+        offset = self.SK_MEMINFO_DROPS * 4
+        return int.from_bytes(raw[offset:offset + 4], sys.byteorder)
 
     @property
     def address(self):

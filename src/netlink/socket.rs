@@ -29,6 +29,13 @@ pub struct Datagram {
 }
 
 impl NetlinkSocket {
+    /// Open the conntrack event socket and subscribe to NAT session events.
+    ///
+    /// # Errors
+    ///
+    /// If the socket cannot be created or bound, or if joining either
+    /// conntrack multicast group fails — which is what happens without
+    /// `CAP_NET_ADMIN`.
     pub fn open(recv_buf_size: usize) -> Result<Self> {
         let fd = unsafe {
             libc::socket(
@@ -136,6 +143,14 @@ impl NetlinkSocket {
     }
 
     /// Receive one netlink datagram into the provided buffer.
+    /// # Errors
+    ///
+    /// If `recvfrom` fails. `EINTR` is reported rather than retried, so the
+    /// caller can check for a pending shutdown.
+    ///
+    /// # Panics
+    ///
+    /// Never: the length is checked to be non-negative before it is converted.
     pub fn recv(&self, buf: &mut [u8]) -> Result<Datagram, io::Error> {
         let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
         let mut addr_len = socklen::<libc::sockaddr_nl>();
@@ -191,6 +206,9 @@ impl NetlinkSocket {
     /// Poll this socket together with an auxiliary descriptor (the signalfd),
     /// with a timeout in milliseconds; a negative timeout blocks.
     /// Returns readiness for `(netlink, aux)`.
+    /// # Errors
+    ///
+    /// If `poll` fails, including with `EINTR`.
     pub fn poll_with(&self, aux_fd: RawFd, timeout_ms: i32) -> Result<(bool, bool), io::Error> {
         let mut fds = [
             libc::pollfd {

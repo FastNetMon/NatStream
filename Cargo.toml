@@ -15,3 +15,15 @@ anyhow = "1"
 # terminal checks exactly what CI does.
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+
+# This library exists so the daemon and the benchmarks can share code, not as a
+# published API, so there is no caller to warn about an ignored return value.
+must_use_candidate = "allow"
+
+[dev-dependencies]
+criterion = { version = "0.7.0", default-features = false, features = ["cargo_bench_support"] }
+
+# The default libtest bench harness is nightly-only; criterion brings its own.
+[[bench]]
+name = "pipeline"
+harness = false
