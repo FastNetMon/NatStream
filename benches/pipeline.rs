@@ -171,12 +171,14 @@ fn plain_event(index: u32) -> Vec<u8> {
 /// datagram, so a busy exporter sees many messages per `recvfrom`, not one.
 ///
 /// `nat_in` gives the proportion that are NAT sessions: 1 for all of them, 4
-/// for one in four.
-fn datagram(events: usize, nat_in: u32) -> Vec<u8> {
+/// for one in four, and `None` for none.
+fn datagram(events: usize, nat_in: Option<u32>) -> Vec<u8> {
     let mut buf = Vec::new();
     for index in 0..u32::try_from(events).expect("event count fits in u32") {
-        if index % nat_in == 0 {
-            let msg_type = if index % (nat_in * 2) == 0 {
+        if let Some(nat_in) = nat_in
+            && index % nat_in == 0
+        {
+            let msg_type = if (index / nat_in) % 2 == 0 {
                 IPCTNL_MSG_CT_NEW
             } else {
                 IPCTNL_MSG_CT_DELETE
@@ -245,7 +247,7 @@ fn decode(c: &mut Criterion) {
 
         // Every event is a NAT session, so every one is decoded in full and
         // handed to the callback.
-        let all_nat = datagram(events, 1);
+        let all_nat = datagram(events, Some(1));
         group.throughput(Throughput::Elements(elements));
         group.bench_with_input(BenchmarkId::new("all_nat", events), &all_nat, |b, buf| {
             b.iter(|| {
@@ -260,7 +262,7 @@ fn decode(c: &mut Criterion) {
 
         // One in four, which is closer to a real box: most conntrack events are
         // not NAT and are rejected on the status check.
-        let mixed = datagram(events, 4);
+        let mixed = datagram(events, Some(4));
         group.throughput(Throughput::Elements(elements));
         group.bench_with_input(
             BenchmarkId::new("one_nat_in_four", events),
@@ -280,7 +282,13 @@ fn decode(c: &mut Criterion) {
 
     // The reject path on its own: how cheaply an uninteresting event is thrown
     // away, which is what the exporter spends most of its time doing.
-    let none_nat = datagram(128, u32::MAX);
+    let none_nat = datagram(128, None);
+    let mut decoded = 0;
+    parse_conntrack_messages(&none_nat, |_| decoded += 1);
+    assert_eq!(
+        decoded, 0,
+        "the no-NAT benchmark fixture contains a NAT event"
+    );
     group.throughput(Throughput::Elements(128));
     group.bench_with_input(BenchmarkId::new("no_nat", 128), &none_nat, |b, buf| {
         b.iter(|| {
@@ -367,7 +375,7 @@ fn pipeline(c: &mut Criterion) {
 
     for events in [16usize, 128] {
         for nat_in in [1u32, 4] {
-            let buf = datagram(events, nat_in);
+            let buf = datagram(events, Some(nat_in));
             group.throughput(Throughput::Elements(
                 u64::try_from(events).expect("event count fits in u64"),
             ));

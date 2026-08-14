@@ -39,7 +39,7 @@ jobs:
         run: cargo build --locked --all-targets
 
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --all-targets
 
   # The end-to-end test: the exporter running against a real kernel, in a user
   # + network namespace. It needs the conntrack modules loaded and unprivileged
