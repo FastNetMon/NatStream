@@ -28,6 +28,132 @@ pub struct Datagram {
     pub sender_portid: u32,
 }
 
+/// Buffers and headers for one batched receive.
+///
+/// `recvmmsg` wants an array of `mmsghdr`, each pointing at its own buffer and
+/// its own address slot. That wiring is done once here and reused for every
+/// receive, so the hot path only resets the few fields the kernel writes back.
+pub struct ReceiveBatch {
+    /// One receive buffer per slot, laid out end to end.
+    storage: Vec<u8>,
+    slot_len: usize,
+    /// Where the kernel writes each datagram's sender.
+    addresses: Vec<libc::sockaddr_nl>,
+    /// One per slot, each pointing into `storage`.
+    iovecs: Vec<libc::iovec>,
+    headers: Vec<libc::mmsghdr>,
+    /// Slots the last receive filled.
+    filled: usize,
+}
+
+impl ReceiveBatch {
+    /// A batch of `slots` datagrams, each up to `slot_len` bytes.
+    ///
+    /// # Panics
+    ///
+    /// If either dimension is zero, which would make the batch useless.
+    #[must_use]
+    pub fn new(slots: usize, slot_len: usize) -> Self {
+        assert!(slots > 0, "a batch needs at least one slot");
+        assert!(slot_len > 0, "a slot needs room for a datagram");
+
+        let mut batch = ReceiveBatch {
+            storage: vec![0u8; slots * slot_len],
+            slot_len,
+            addresses: vec![unsafe { std::mem::zeroed() }; slots],
+            iovecs: vec![
+                libc::iovec {
+                    iov_base: std::ptr::null_mut(),
+                    iov_len: 0,
+                };
+                slots
+            ],
+            headers: vec![unsafe { std::mem::zeroed() }; slots],
+            filled: 0,
+        };
+        batch.wire_up();
+        batch
+    }
+
+    /// Slots in the batch, which is the most one receive can return.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.headers.len()
+    }
+
+    fn capacity_as_c_uint(&self) -> libc::c_uint {
+        libc::c_uint::try_from(self.capacity()).expect("a batch is a handful of slots")
+    }
+
+    /// Point every header at its own buffer and address.
+    ///
+    /// The vectors are allocated once in `new` and never resized, so the
+    /// pointers taken here stay valid for the life of the batch. Nothing but
+    /// this type can reach them, and it hands out only slices.
+    fn wire_up(&mut self) {
+        let storage = self.storage.as_mut_ptr();
+        let addresses = self.addresses.as_mut_ptr();
+        let iovecs = self.iovecs.as_mut_ptr();
+        let slot_len = self.slot_len;
+
+        for index in 0..self.headers.len() {
+            // SAFETY: `index` is below the length of every vector, and each
+            // slot's buffer is `slot_len` bytes at `index * slot_len`.
+            unsafe {
+                *iovecs.add(index) = libc::iovec {
+                    iov_base: storage.add(index * slot_len).cast::<libc::c_void>(),
+                    iov_len: slot_len,
+                };
+
+                let header = &mut *self.headers.as_mut_ptr().add(index);
+                header.msg_hdr.msg_name = addresses.add(index).cast::<libc::c_void>();
+                header.msg_hdr.msg_namelen = socklen::<libc::sockaddr_nl>();
+                header.msg_hdr.msg_iov = iovecs.add(index);
+                header.msg_hdr.msg_iovlen = 1;
+                header.msg_hdr.msg_control = std::ptr::null_mut();
+                header.msg_hdr.msg_controllen = 0;
+                header.msg_hdr.msg_flags = 0;
+                header.msg_len = 0;
+            }
+        }
+    }
+
+    /// Restore the fields the kernel writes back, before reusing the batch.
+    fn reset(&mut self) {
+        self.filled = 0;
+        for header in &mut self.headers {
+            header.msg_hdr.msg_namelen = socklen::<libc::sockaddr_nl>();
+            header.msg_hdr.msg_flags = 0;
+            header.msg_len = 0;
+        }
+    }
+
+    /// The datagram in slot `index`, and the bytes it holds.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is beyond what the last receive filled.
+    #[must_use]
+    pub fn datagram(&self, index: usize) -> (Datagram, &[u8]) {
+        assert!(index < self.filled, "slot {index} was not filled");
+
+        // With MSG_TRUNC this is the datagram's real length, which can exceed
+        // the slot it was read into.
+        let datagram_len = self.headers[index].msg_len as usize;
+        let len = datagram_len.min(self.slot_len);
+        let start = index * self.slot_len;
+
+        (
+            Datagram {
+                len,
+                datagram_len,
+                sender_portid: self.addresses[index].nl_pid,
+            },
+            &self.storage[start..start + len],
+        )
+    }
+}
+
 impl NetlinkSocket {
     /// Open the conntrack event socket and subscribe to NAT session events.
     ///
@@ -142,42 +268,48 @@ impl NetlinkSocket {
         Ok(())
     }
 
-    /// Receive one netlink datagram into the provided buffer.
+    /// Receive as many datagrams as are queued, up to the size of `batch`.
+    ///
+    /// One `recvmmsg` in place of a `recvfrom` per datagram. The kernel already
+    /// packs several conntrack messages into each datagram; this collects
+    /// several datagrams per syscall on top of that, which is what the ingest
+    /// path spends most of its time on under load.
+    ///
+    /// Returns how many slots were filled. The socket is non-blocking here, so
+    /// an empty socket reports `WouldBlock` rather than waiting — the caller
+    /// drains until that happens and then goes back to `poll`.
+    ///
     /// # Errors
     ///
-    /// If `recvfrom` fails. `EINTR` is reported rather than retried, so the
-    /// caller can check for a pending shutdown.
+    /// If `recvmmsg` fails. `EAGAIN` (as `WouldBlock`) means the socket is
+    /// drained, and `EINTR` is reported rather than retried so the caller can
+    /// check for a pending shutdown.
     ///
     /// # Panics
     ///
-    /// Never: the length is checked to be non-negative before it is converted.
-    pub fn recv(&self, buf: &mut [u8]) -> Result<Datagram, io::Error> {
-        let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
-        let mut addr_len = socklen::<libc::sockaddr_nl>();
+    /// Never: the count is checked to be non-negative before it is converted.
+    pub fn recv_batch(&self, batch: &mut ReceiveBatch) -> Result<usize, io::Error> {
+        batch.reset();
 
-        // MSG_TRUNC makes the return value the datagram's real length even when
-        // it did not fit, so an oversized message can be reported rather than
-        // silently losing its tail.
-        let n = unsafe {
-            libc::recvfrom(
+        let received = unsafe {
+            libc::recvmmsg(
                 self.fd,
-                buf.as_mut_ptr().cast::<libc::c_void>(),
-                buf.len(),
-                libc::MSG_TRUNC,
-                (&raw mut addr).cast::<libc::sockaddr>(),
-                &raw mut addr_len,
+                batch.headers.as_mut_ptr(),
+                batch.capacity_as_c_uint(),
+                // MSG_TRUNC reports each datagram's real length even when it
+                // did not fit, so an oversized one is counted rather than
+                // silently losing its tail.
+                libc::MSG_DONTWAIT | libc::MSG_TRUNC,
+                std::ptr::null_mut(),
             )
         };
-        if n < 0 {
+        if received < 0 {
+            batch.filled = 0;
             return Err(io::Error::last_os_error());
         }
 
-        let datagram_len = usize::try_from(n).expect("checked non-negative above");
-        Ok(Datagram {
-            len: datagram_len.min(buf.len()),
-            datagram_len,
-            sender_portid: addr.nl_pid,
-        })
+        batch.filled = usize::try_from(received).expect("checked non-negative above");
+        Ok(batch.filled)
     }
 
     /// Get the cumulative number of drops on this socket via `SO_MEMINFO`.

@@ -81,6 +81,18 @@ pub const NLA_HDRLEN: usize = 4;
 pub const DEFAULT_RECV_BUF_SIZE: usize = 4 * 1024 * 1024; // 4 MB
 pub const DEFAULT_SEND_BUF_SIZE: usize = 4 * 1024 * 1024; // 4 MB
 
+/// How many datagrams one `recvmmsg` asks the kernel for.
+///
+/// The kernel packs several conntrack messages into each datagram, and this
+/// collects several datagrams per syscall on top of that. Sixteen is enough to
+/// amortise the call without holding a large idle buffer: the slots are only as
+/// full as the traffic makes them.
+pub const RECV_BATCH_SIZE: usize = 16;
+
+/// The buffer behind each slot of a batch, and so the largest netlink datagram
+/// that can be taken whole. Anything longer is reported as truncated.
+pub const RECV_SLOT_SIZE: usize = 64 * 1024;
+
 /// The size of an FFI option value, at the width the sockets API asks for.
 ///
 /// Every use is `size_of` of a small fixed struct, so the value is a

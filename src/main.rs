@@ -13,8 +13,10 @@ use log::{debug, error, info, warn};
 
 use natstream::export::{self, CounterWidth, Encoder, Profile, Protocol, Template};
 use natstream::netlink::constants::{
-    DEFAULT_RECV_BUF_SIZE, DEFAULT_SEND_BUF_SIZE, buffer_size, socklen,
+    DEFAULT_RECV_BUF_SIZE, DEFAULT_SEND_BUF_SIZE, RECV_BATCH_SIZE, RECV_SLOT_SIZE, buffer_size,
+    socklen,
 };
+use natstream::netlink::socket::ReceiveBatch;
 use natstream::netlink::{NetlinkSocket, parse_conntrack_messages};
 use natstream::signals::{self, SignalFd};
 
@@ -38,6 +40,12 @@ const FLUSH_TIMEOUT_MS: i32 = 100;
 
 /// How often the drop and error counters are reported.
 const STATS_INTERVAL_SECS: u64 = 10;
+
+/// Batches to drain before returning to the timers.
+///
+/// Without a bound, traffic arriving as fast as it can be read would keep the
+/// loop here indefinitely and the template retransmit would never come round.
+const MAX_BATCHES_PER_POLL: usize = 64;
 
 const CONNTRACK_ACCT_SYSCTL: &str = "/proc/sys/net/netfilter/nf_conntrack_acct";
 const CONNTRACK_EVENTS_SYSCTL: &str = "/proc/sys/net/netfilter/nf_conntrack_events";
@@ -185,8 +193,8 @@ fn run_worker(args: &Args) -> Result<()> {
     let mut prev_foreign_msgs: u64 = 0;
     let mut prev_saturated: u64 = 0;
 
-    // Receive buffer (64KB)
-    let mut recv_buf = vec![0u8; 65536];
+    // Slots for the batched receive, sized once and reused.
+    let mut batch = ReceiveBatch::new(RECV_BATCH_SIZE, RECV_SLOT_SIZE);
 
     info!("Listening for conntrack NAT events...");
 
@@ -295,63 +303,80 @@ fn run_worker(args: &Args) -> Result<()> {
             continue;
         }
 
-        // Receive netlink messages
-        let datagram = match nl_socket.recv(&mut recv_buf) {
-            Ok(datagram) => datagram,
-            Err(e) => {
-                if e.kind() == io::ErrorKind::Interrupted {
+        // Drain the socket rather than going back to poll() for every
+        // datagram. Under load the kernel has more queued the moment we finish
+        // one batch, and a poll() per receive was half the ingest syscalls.
+        for _ in 0..MAX_BATCHES_PER_POLL {
+            let received = match nl_socket.recv_batch(&mut batch) {
+                Ok(0) => break,
+                Ok(received) => received,
+                Err(e) => match e.kind() {
+                    // Drained, or interrupted by a signal that the next poll()
+                    // will report. Either way there is nothing more to read.
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => break,
+                    _ => {
+                        error!("recvmmsg() failed: {e}");
+                        break;
+                    }
+                },
+            };
+
+            for index in 0..received {
+                let (datagram, bytes) = batch.datagram(index);
+
+                // Conntrack notifications originate in the kernel, which uses
+                // port ID 0.
+                if datagram.sender_portid != 0 {
+                    foreign_msgs += 1;
                     continue;
                 }
-                error!("recv() failed: {e}");
-                continue;
-            }
-        };
 
-        // Conntrack notifications originate in the kernel, which uses port ID 0.
-        if datagram.sender_portid != 0 {
-            foreign_msgs += 1;
-            continue;
-        }
-
-        if datagram.datagram_len > datagram.len {
-            truncated_msgs += 1;
-            warn!(
-                "netlink datagram truncated: kept {} of {} bytes",
-                datagram.len, datagram.datagram_len
-            );
-        }
-
-        if datagram.len == 0 {
-            continue;
-        }
-
-        // Ensure we have an active message
-        if !message_active {
-            encoder.begin_message(include_template);
-            message_active = true;
-        }
-
-        // Parse all conntrack messages and encode them
-        parse_conntrack_messages(&recv_buf[..datagram.len], |event| {
-            debug!("{event}");
-
-            if !encoder.add_record(&event) {
-                // Message full — finalize and send, then start a new one
-                flush_message(
-                    &mut encoder,
-                    &udp_socket,
-                    &mut send_errors,
-                    &mut include_template,
-                    &mut last_template_time,
-                    "full",
-                );
-
-                encoder.begin_message(include_template);
-                if !encoder.add_record(&event) {
-                    error!("BUG: failed to add record to fresh message");
+                if datagram.datagram_len > datagram.len {
+                    truncated_msgs += 1;
+                    warn!(
+                        "netlink datagram truncated: kept {} of {} bytes",
+                        datagram.len, datagram.datagram_len
+                    );
                 }
+
+                if datagram.len == 0 {
+                    continue;
+                }
+
+                // Ensure we have an active message
+                if !message_active {
+                    encoder.begin_message(include_template);
+                    message_active = true;
+                }
+
+                // Parse all conntrack messages and encode them
+                parse_conntrack_messages(bytes, |event| {
+                    debug!("{event}");
+
+                    if !encoder.add_record(&event) {
+                        // Message full — finalize and send, then start a new one
+                        flush_message(
+                            &mut encoder,
+                            &udp_socket,
+                            &mut send_errors,
+                            &mut include_template,
+                            &mut last_template_time,
+                            "full",
+                        );
+
+                        encoder.begin_message(include_template);
+                        if !encoder.add_record(&event) {
+                            error!("BUG: failed to add record to fresh message");
+                        }
+                    }
+                });
             }
-        });
+
+            // A partly filled batch means the socket had nothing more to give.
+            if received < batch.capacity() {
+                break;
+            }
+        }
     }
 
     // Flush remaining records on shutdown
