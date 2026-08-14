@@ -22,7 +22,7 @@ jobs:
         run: |
           rustup update stable --no-self-update
           rustup default stable
-          rustup component add clippy
+          rustup component add clippy rustfmt
           rustc --version
 
       - name: Cache cargo
@@ -34,6 +34,11 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
+
+      - name: Format
+        # The hand-laid-out tables — the profile field lists, the netlink test
+        # fixtures — carry #[rustfmt::skip], so this checks everything else.
+        run: cargo fmt --check
 
       - name: Build
         run: cargo build --locked --all-targets

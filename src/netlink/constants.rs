@@ -44,8 +44,8 @@ pub const CTA_COUNTERS_PACKETS: u16 = 1;
 pub const CTA_COUNTERS_BYTES: u16 = 2;
 
 // Conntrack status flags
-pub const IPS_SRC_NAT: u32 = 1 << 4;  // 0x10
-pub const IPS_DST_NAT: u32 = 1 << 5;  // 0x20
+pub const IPS_SRC_NAT: u32 = 1 << 4; // 0x10
+pub const IPS_DST_NAT: u32 = 1 << 5; // 0x20
 pub const IPS_NAT_MASK: u32 = IPS_SRC_NAT | IPS_DST_NAT;
 
 // NLA alignment

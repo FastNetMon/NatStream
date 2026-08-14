@@ -3,14 +3,14 @@ mod export;
 mod netlink;
 mod signals;
 
-use std::io;
 use std::ffi::CString;
 use std::fs;
+use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -18,7 +18,7 @@ use log::{debug, error, info, warn};
 
 use export::{CounterWidth, Encoder, Profile, Protocol, Template};
 use netlink::constants::{DEFAULT_RECV_BUF_SIZE, DEFAULT_SEND_BUF_SIZE};
-use netlink::{parse_conntrack_messages, NetlinkSocket};
+use netlink::{NetlinkSocket, parse_conntrack_messages};
 use signals::SignalFd;
 
 /// How long the supervisor waits for the worker to exit on its own after
@@ -128,7 +128,10 @@ fn run_worker(args: &Args) -> Result<()> {
     )
     .context("Invalid export configuration")?;
 
-    info!("Starting conntrack_exporter worker, collector={}", args.collector);
+    info!(
+        "Starting conntrack_exporter worker, collector={}",
+        args.collector
+    );
     info!(
         "Exporting {:?}, profile={:?}, counters={}B, record={}B, template id={}, \
          up to {} records per message",
@@ -157,8 +160,7 @@ fn run_worker(args: &Args) -> Result<()> {
     set_send_buf(&udp_socket, args.send_buf);
 
     // Create netlink socket
-    let nl_socket =
-        NetlinkSocket::open(args.recv_buf).context("Failed to open netlink socket")?;
+    let nl_socket = NetlinkSocket::open(args.recv_buf).context("Failed to open netlink socket")?;
 
     // Create the encoder from the template resolved above
     let mut encoder = Encoder::new(args.domain_id, template);
@@ -414,7 +416,10 @@ fn flush_message(
 fn run_supervisor(args: &Args) -> Result<()> {
     let pid = unsafe { libc::fork() };
     if pid < 0 {
-        return Err(anyhow::anyhow!("fork() failed: {}", io::Error::last_os_error()));
+        return Err(anyhow::anyhow!(
+            "fork() failed: {}",
+            io::Error::last_os_error()
+        ));
     }
     if pid > 0 {
         info!("Daemon started, supervisor pid={}", pid);
@@ -422,7 +427,10 @@ fn run_supervisor(args: &Args) -> Result<()> {
     }
 
     if unsafe { libc::setsid() } < 0 {
-        return Err(anyhow::anyhow!("setsid() failed: {}", io::Error::last_os_error()));
+        return Err(anyhow::anyhow!(
+            "setsid() failed: {}",
+            io::Error::last_os_error()
+        ));
     }
     redirect_stdio(args.log_file.as_deref())?;
 
@@ -616,11 +624,7 @@ fn redirect_stdio(log_file: Option<&Path>) -> Result<()> {
     let devnull = open_fd(Path::new("/dev/null"), libc::O_RDWR, 0)?;
 
     let out_fd = match log_file {
-        Some(path) => open_fd(
-            path,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
-            0o640,
-        )?,
+        Some(path) => open_fd(path, libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND, 0o640)?,
         None => devnull,
     };
 
@@ -685,10 +689,7 @@ fn set_send_buf(socket: &UdpSocket, size: usize) {
             )
         };
         if ret < 0 {
-            warn!(
-                "Failed to set SO_SNDBUF: {}",
-                io::Error::last_os_error()
-            );
+            warn!("Failed to set SO_SNDBUF: {}", io::Error::last_os_error());
         }
     }
 }
@@ -710,7 +711,10 @@ fn apply_conntrack_sysctl_settings(args: &Args) -> Result<()> {
     // Without accounting the flows are still exported, just with zero counters.
     // That is degraded, not fatal.
     if let Err(e) = set_proc_sysctl(CONNTRACK_ACCT_SYSCTL, "1") {
-        warn!("conntrack accounting unavailable, counters will be zero: {:#}", e);
+        warn!(
+            "conntrack accounting unavailable, counters will be zero: {:#}",
+            e
+        );
     }
 
     Ok(())
@@ -928,7 +932,12 @@ mod tests {
 
     #[test]
     fn the_collector_must_be_an_address_and_port() {
-        for bad in ["203.0.113.10", "not-an-address", "203.0.113.10:notaport", ""] {
+        for bad in [
+            "203.0.113.10",
+            "not-an-address",
+            "203.0.113.10:notaport",
+            "",
+        ] {
             assert!(
                 Args::try_parse_from(["conntrack_exporter", "--collector", bad]).is_err(),
                 "{bad:?} should not parse as a collector"
@@ -975,14 +984,8 @@ mod tests {
             ["--profile", "everything"],
         ] {
             assert!(
-                Args::try_parse_from([
-                    "conntrack_exporter",
-                    "-c",
-                    "10.0.0.1:1",
-                    args[0],
-                    args[1]
-                ])
-                .is_err(),
+                Args::try_parse_from(["conntrack_exporter", "-c", "10.0.0.1:1", args[0], args[1]])
+                    .is_err(),
                 "{args:?} should be refused"
             );
         }

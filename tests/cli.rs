@@ -178,7 +178,10 @@ fn help_lists_every_documented_option() {
         "--log-file",
         "--no-sysctl",
     ] {
-        assert!(help.contains(flag), "{flag} is missing from --help:\n{help}");
+        assert!(
+            help.contains(flag),
+            "{flag} is missing from --help:\n{help}"
+        );
     }
 }
 

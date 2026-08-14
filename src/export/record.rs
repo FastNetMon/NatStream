@@ -198,7 +198,10 @@ mod tests {
         assert_eq!(saturated, 0);
         assert_eq!(r.len(), 42);
         // Everything up to the counters is byte-identical to the wide record.
-        let (wide, _) = encode(&self::template(Profile::Full, CounterWidth::Eight), &event());
+        let (wide, _) = encode(
+            &self::template(Profile::Full, CounterWidth::Eight),
+            &event(),
+        );
         assert_eq!(&r[..26], &wide[..26]);
 
         assert_eq!(be32(&r[26..30]), 700);

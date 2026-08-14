@@ -251,8 +251,13 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn template() -> Template {
-        Template::resolve(Protocol::Ipfix, Profile::Full, CounterWidth::Eight, DEFAULT_TEMPLATE_ID)
-            .unwrap()
+        Template::resolve(
+            Protocol::Ipfix,
+            Profile::Full,
+            CounterWidth::Eight,
+            DEFAULT_TEMPLATE_ID,
+        )
+        .unwrap()
     }
 
     fn encoder() -> Encoder {
@@ -324,7 +329,11 @@ mod tests {
 
         assert_eq!(count, 1);
         assert_eq!(be16(&msg[0..2]), IPFIX_VERSION);
-        assert_eq!(be16(&msg[2..4]) as usize, msg.len(), "length field must match");
+        assert_eq!(
+            be16(&msg[2..4]) as usize,
+            msg.len(),
+            "length field must match"
+        );
         assert_ne!(be32(&msg[4..8]), 0, "export time should be set");
         assert_eq!(be32(&msg[8..12]), 0, "first message starts at sequence 0");
         assert_eq!(be32(&msg[12..16]), 42, "observation domain id");
@@ -336,7 +345,10 @@ mod tests {
         enc.begin_message(true);
 
         assert!(enc.template_included());
-        assert!(enc.has_pending_output(), "a template alone is worth sending");
+        assert!(
+            enc.has_pending_output(),
+            "a template alone is worth sending"
+        );
 
         let set_size = enc.template.set_size();
         let (msg, count) = enc.finalize();
@@ -440,7 +452,10 @@ mod tests {
         let mut accepted = 0;
         while enc.add_record(&event()) {
             accepted += 1;
-            assert!(accepted < 1000, "add_record never reported the message full");
+            assert!(
+                accepted < 1000,
+                "add_record never reported the message full"
+            );
         }
         let (msg, count) = enc.finalize();
         assert_eq!(count, accepted);
@@ -681,8 +696,7 @@ mod tests {
                 for width in [CounterWidth::Four, CounterWidth::Eight] {
                     let template =
                         Template::resolve(protocol, profile, width, DEFAULT_TEMPLATE_ID).unwrap();
-                    let declared: usize =
-                        template.fields.iter().map(|f| f.length as usize).sum();
+                    let declared: usize = template.fields.iter().map(|f| f.length as usize).sum();
                     assert_eq!(declared, template.record_size);
 
                     let label = format!("{protocol:?}/{profile:?}/{width:?}");
@@ -729,9 +743,13 @@ mod tests {
 
     #[test]
     fn narrow_counters_clamp_instead_of_truncating() {
-        let template =
-            Template::resolve(Protocol::Ipfix, Profile::Full, CounterWidth::Four, DEFAULT_TEMPLATE_ID)
-                .unwrap();
+        let template = Template::resolve(
+            Protocol::Ipfix,
+            Profile::Full,
+            CounterWidth::Four,
+            DEFAULT_TEMPLATE_ID,
+        )
+        .unwrap();
         let mut enc = Encoder::new(0, template);
         enc.begin_message(false);
 
@@ -744,7 +762,11 @@ mod tests {
 
         let (msg, _) = enc.finalize();
         let r = &msg[20..];
-        assert_eq!(be32(&r[26..30]), u32::MAX, "clamped, not wrapped to a small value");
+        assert_eq!(
+            be32(&r[26..30]),
+            u32::MAX,
+            "clamped, not wrapped to a small value"
+        );
         assert_eq!(be32(&r[30..34]), 5);
     }
 }

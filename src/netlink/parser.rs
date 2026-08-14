@@ -96,7 +96,14 @@ fn parse_nla_tree(nat_event: NatEventType, data: &[u8]) -> Option<ConntrackEvent
 
         match nla_type {
             CTA_TUPLE_ORIG => {
-                parse_tuple(payload, &mut src_ip, &mut dst_ip, &mut protocol, &mut src_port, &mut dst_port);
+                parse_tuple(
+                    payload,
+                    &mut src_ip,
+                    &mut dst_ip,
+                    &mut protocol,
+                    &mut src_port,
+                    &mut dst_port,
+                );
             }
             CTA_TUPLE_REPLY => {
                 // The reply tuple is the original tuple with both translations
@@ -321,7 +328,14 @@ mod tests {
         attr(nla_type | NLA_F_NESTED, &children.concat())
     }
 
-    fn tuple(nla_type: u16, src: [u8; 4], dst: [u8; 4], proto: u8, sport: u16, dport: u16) -> Vec<u8> {
+    fn tuple(
+        nla_type: u16,
+        src: [u8; 4],
+        dst: [u8; 4],
+        proto: u8,
+        sport: u16,
+        dport: u16,
+    ) -> Vec<u8> {
         nested(
             nla_type,
             &[
@@ -370,7 +384,11 @@ mod tests {
     }
 
     fn ct_event(msg_type: u8, family: u8, attrs: &[Vec<u8>]) -> Vec<u8> {
-        message((NFNL_SUBSYS_CTNETLINK << 8) | msg_type as u16, family, attrs)
+        message(
+            (NFNL_SUBSYS_CTNETLINK << 8) | msg_type as u16,
+            family,
+            attrs,
+        )
     }
 
     fn parse(buf: &[u8]) -> Vec<ConntrackEvent> {
@@ -380,6 +398,7 @@ mod tests {
     }
 
     /// SNAT: 192.168.1.10:1234 -> 8.8.8.8:53, source rewritten to 203.0.113.5:40000.
+    #[rustfmt::skip] // the tuple pair reads as a table
     fn snat_event() -> Vec<u8> {
         ct_event(
             IPCTNL_MSG_CT_NEW,
@@ -421,6 +440,7 @@ mod tests {
     }
 
     #[test]
+    #[rustfmt::skip] // the tuple pair reads as a table
     fn dnat_event_reports_the_translated_destination() {
         // 10.0.0.1:5000 -> 203.0.113.1:80, destination rewritten to 10.0.0.99:8080.
         let buf = ct_event(
@@ -446,6 +466,7 @@ mod tests {
     }
 
     #[test]
+    #[rustfmt::skip] // the tuple pair reads as a table
     fn delete_message_yields_a_delete_event() {
         let buf = ct_event(
             IPCTNL_MSG_CT_DELETE,
@@ -482,13 +503,21 @@ mod tests {
         let buf = ct_event(
             IPCTNL_MSG_CT_NEW,
             libc::AF_INET as u8,
-            &[tuple(CTA_TUPLE_ORIG, [10, 0, 0, 1], [10, 0, 0, 2], 6, 1000, 2000)],
+            &[tuple(
+                CTA_TUPLE_ORIG,
+                [10, 0, 0, 1],
+                [10, 0, 0, 2],
+                6,
+                1000,
+                2000,
+            )],
         );
 
         assert!(parse(&buf).is_empty());
     }
 
     #[test]
+    #[rustfmt::skip] // the tuple pair reads as a table
     fn netlink_control_messages_are_not_events() {
         // NLMSG_ERROR is 0x2, the same low byte as IPCTNL_MSG_CT_DELETE. Without
         // a subsystem check this parses as a NAT session teardown.
@@ -580,7 +609,10 @@ mod tests {
                     CTA_TUPLE_ORIG,
                     &[nested(
                         CTA_TUPLE_IP,
-                        &[attr(CTA_IP_V4_SRC, &[10, 0]), attr(CTA_IP_V4_DST, &[10, 0, 0, 2])],
+                        &[
+                            attr(CTA_IP_V4_SRC, &[10, 0]),
+                            attr(CTA_IP_V4_DST, &[10, 0, 0, 2]),
+                        ],
                     )],
                 ),
                 attr(CTA_STATUS, &IPS_SRC_NAT.to_be_bytes()),

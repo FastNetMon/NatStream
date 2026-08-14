@@ -95,6 +95,10 @@ const fn field(source: FieldSource, ipfix: Element, width: Width) -> FieldShape 
 }
 
 /// Everything: both NAT directions and both counter directions.
+///
+/// Laid out one field per line to be read against the record layout table in
+/// the README, which is why the three profile tables opt out of rustfmt.
+#[rustfmt::skip]
 pub const PROFILE_FULL: &[FieldShape] = &[
     field(FieldSource::NatEvent, ie(IE_NAT_EVENT), Width::Fixed(1)),
     field(FieldSource::Protocol, ie(IE_PROTOCOL_IDENTIFIER), Width::Fixed(1)),
@@ -114,6 +118,7 @@ pub const PROFILE_FULL: &[FieldShape] = &[
 
 /// For collectors that know the source-NAT elements but not the destination
 /// ones. Drops postNATDestination* only.
+#[rustfmt::skip]
 pub const PROFILE_NAT_SOURCE: &[FieldShape] = &[
     field(FieldSource::NatEvent, ie(IE_NAT_EVENT), Width::Fixed(1)),
     field(FieldSource::Protocol, ie(IE_PROTOCOL_IDENTIFIER), Width::Fixed(1)),
@@ -133,6 +138,7 @@ pub const PROFILE_NAT_SOURCE: &[FieldShape] = &[
 /// information at all** — the pre-NAT five-tuple and counters, nothing more.
 /// It exists for collectors that cannot decode natEvent or the postNAT
 /// elements, which are not in RFC 3954's field table.
+#[rustfmt::skip]
 pub const PROFILE_FLOW_ONLY: &[FieldShape] = &[
     field(FieldSource::Protocol, ie(IE_PROTOCOL_IDENTIFIER), Width::Fixed(1)),
     field(FieldSource::SrcIp, ie(IE_SOURCE_IPV4_ADDRESS), Width::Fixed(4)),
@@ -354,9 +360,8 @@ impl Template {
 
         // A message that cannot hold its own template plus one record would
         // never make progress.
-        let smallest_useful = protocol.header_len()
-            + template.set_size()
-            + template.data_set_size(1);
+        let smallest_useful =
+            protocol.header_len() + template.set_size() + template.data_set_size(1);
         if smallest_useful > MAX_MSG_SIZE {
             bail!(
                 "a {record_size}-byte record with a {}-byte template does not fit \
@@ -495,6 +500,7 @@ mod tests {
     /// Same values, but v9 has no enterprise mechanism, so the reverse counters
     /// become the dedicated OUT_BYTES/OUT_PKTS types.
     #[test]
+    #[rustfmt::skip] // the expected IDs read as one sequence, not one per line
     fn the_netflow9_full_profile_swaps_the_reverse_elements_for_out_counters() {
         let v9 = resolve(Protocol::Netflow9, Profile::Full, CounterWidth::Eight);
         let ids: Vec<u16> = v9.fields.iter().map(|f| f.id).collect();
@@ -511,9 +517,10 @@ mod tests {
     /// numbers, so IPFIX must keep the RFC 5103 enterprise elements.
     #[test]
     fn ipfix_never_borrows_the_netflow9_out_counter_types() {
-        for (profile, width) in ALL_PROFILES.into_iter().flat_map(|p| {
-            ALL_WIDTHS.into_iter().map(move |w| (p, w))
-        }) {
+        for (profile, width) in ALL_PROFILES
+            .into_iter()
+            .flat_map(|p| ALL_WIDTHS.into_iter().map(move |w| (p, w)))
+        {
             let template = resolve(Protocol::Ipfix, profile, width);
             for field in &template.fields {
                 if field.pen.is_none() {
@@ -529,9 +536,10 @@ mod tests {
 
     #[test]
     fn netflow9_never_resolves_an_enterprise_element() {
-        for (profile, width) in ALL_PROFILES.into_iter().flat_map(|p| {
-            ALL_WIDTHS.into_iter().map(move |w| (p, w))
-        }) {
+        for (profile, width) in ALL_PROFILES
+            .into_iter()
+            .flat_map(|p| ALL_WIDTHS.into_iter().map(move |w| (p, w)))
+        {
             let template = resolve(Protocol::Netflow9, profile, width);
             assert!(
                 template.fields.iter().all(|f| f.pen.is_none()),
@@ -648,10 +656,7 @@ mod tests {
         let ipfix = resolve(Protocol::Ipfix, Profile::Full, CounterWidth::Eight);
         // IPFIX sets are not padded, so the size is exact for any count.
         for records in 0..4 {
-            assert_eq!(
-                ipfix.data_set_size(records),
-                SET_HEADER_LEN + records * 58
-            );
+            assert_eq!(ipfix.data_set_size(records), SET_HEADER_LEN + records * 58);
         }
 
         // A 58-byte record leaves an odd v9 FlowSet for odd counts, which RFC
@@ -680,7 +685,10 @@ mod tests {
             let used = |records| {
                 protocol.header_len() + template.set_size() + template.data_set_size(records)
             };
-            assert!(used(capacity) <= MAX_MSG_SIZE, "{label}: capacity overflows");
+            assert!(
+                used(capacity) <= MAX_MSG_SIZE,
+                "{label}: capacity overflows"
+            );
             assert!(
                 used(capacity + 1) > MAX_MSG_SIZE,
                 "{label}: one more record would still have fit"
@@ -707,13 +715,8 @@ mod tests {
     #[test]
     fn template_ids_below_the_reserved_range_are_rejected() {
         for id in [0, 1, 2, 255] {
-            let err = Template::resolve(
-                Protocol::Ipfix,
-                Profile::Full,
-                CounterWidth::Eight,
-                id,
-            )
-            .expect_err("template ID {id} must be rejected");
+            let err = Template::resolve(Protocol::Ipfix, Profile::Full, CounterWidth::Eight, id)
+                .expect_err("template ID {id} must be rejected");
             assert!(
                 err.to_string().contains("at least 256"),
                 "unhelpful error: {err}"
@@ -743,13 +746,8 @@ mod tests {
 
     #[test]
     fn the_template_id_is_carried_through_to_the_resolved_template() {
-        let template = Template::resolve(
-            Protocol::Ipfix,
-            Profile::Full,
-            CounterWidth::Eight,
-            4242,
-        )
-        .unwrap();
+        let template =
+            Template::resolve(Protocol::Ipfix, Profile::Full, CounterWidth::Eight, 4242).unwrap();
         assert_eq!(template.template_id, 4242);
     }
 
@@ -761,8 +759,7 @@ mod tests {
         assert_eq!(CounterWidth::Eight.bytes(), 8);
 
         for bad in [0u8, 1, 2, 3, 5, 6, 7, 9, 16, 255] {
-            let err = CounterWidth::from_bytes(bad)
-                .expect_err("width {bad} must be rejected");
+            let err = CounterWidth::from_bytes(bad).expect_err("width {bad} must be rejected");
             assert!(
                 err.to_string().contains("must be 4 or 8"),
                 "unhelpful error: {err}"
@@ -778,7 +775,11 @@ mod tests {
         assert_eq!(Protocol::Ipfix.header_len(), 16);
         assert_eq!(Protocol::Ipfix.template_set_id(), 2);
         assert!(Protocol::Ipfix.supports_enterprise());
-        assert_eq!(Protocol::Ipfix.set_alignment(), 1, "IPFIX sets are unpadded");
+        assert_eq!(
+            Protocol::Ipfix.set_alignment(),
+            1,
+            "IPFIX sets are unpadded"
+        );
 
         assert_eq!(Protocol::Netflow9.version(), 9);
         assert_eq!(Protocol::Netflow9.header_len(), 20);

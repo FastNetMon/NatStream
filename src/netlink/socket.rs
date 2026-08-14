@@ -60,10 +60,7 @@ impl NetlinkSocket {
                 )
             };
             if ret < 0 {
-                warn!(
-                    "Failed to set SO_RCVBUF: {}",
-                    io::Error::last_os_error()
-                );
+                warn!("Failed to set SO_RCVBUF: {}", io::Error::last_os_error());
             }
         }
 
