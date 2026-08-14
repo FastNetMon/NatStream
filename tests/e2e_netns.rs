@@ -1,7 +1,7 @@
 //! End-to-end test against a real kernel, driven through `cargo test`.
 //!
 //! The exporter runs unmodified in a throwaway user + network namespace, where
-//! an unprivileged user holds CAP_NET_ADMIN over a network stack of its own:
+//! an unprivileged user holds `CAP_NET_ADMIN` over a network stack of its own:
 //! real conntrack events over real netlink, decoded from the real UDP export.
 //! See `tests/e2e/` for the harness.
 //!
@@ -13,7 +13,7 @@
 //!     ./tests/e2e/run-netns.sh --all   # the same matrix, outside cargo
 //!
 //! On a host that cannot provide the namespaces — no unprivileged user
-//! namespaces, or nf_conntrack not loaded — the harness exits 77 and this
+//! namespaces, or `nf_conntrack` not loaded — the harness exits 77 and this
 //! skips rather than reporting a failure it cannot do anything about.
 
 use std::path::PathBuf;

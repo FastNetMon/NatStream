@@ -2,6 +2,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::event::ConntrackEvent;
 
+// A module of nothing but protocol constants, named after the RFC field
+// they encode. Listing them individually would be a maintenance burden
+// with nothing to show for it.
+#[allow(clippy::wildcard_imports)]
 use super::elements::*;
 use super::record::write_record;
 use super::template::{Protocol, Template, align_up};
@@ -18,9 +22,20 @@ fn put_u32(buf: &mut [u8], offset: &mut usize, value: u32) {
     *offset += 4;
 }
 
+/// Narrow a length to the 16-bit field both protocols carry it in.
+///
+/// Every caller is bounded by `MAX_MSG_SIZE`, which is far below `u16::MAX`, so
+/// this cannot fail. It is written as a conversion rather than a cast so that a
+/// future change to the message budget cannot silently truncate a length field
+/// instead — a corrupt length is the one error a collector cannot recover from.
+#[inline]
+fn message_len(value: usize) -> u16 {
+    u16::try_from(value).expect("message lengths are bounded by MAX_MSG_SIZE")
+}
+
 /// Pre-allocated message encoder for both export protocols.
 ///
-/// The data record body is identical under IPFIX and NetFlow v9 — same fields,
+/// The data record body is identical under IPFIX and `NetFlow` v9 — same fields,
 /// same order, same widths — so only the message header and the way a template
 /// is described differ.
 pub struct Encoder {
@@ -34,7 +49,7 @@ pub struct Encoder {
     observation_domain_id: u32,
     template: Template,
     saturated_counters: u64,
-    /// Reference point for NetFlow v9's sysUpTime.
+    /// Reference point for `NetFlow` v9's sysUpTime.
     started: Instant,
 }
 
@@ -139,11 +154,14 @@ impl Encoder {
         // then patch its length, which includes that padding.
         if self.data_set_open {
             self.pad_set();
-            let data_set_len = (self.offset - self.data_set_offset) as u16;
+            let data_set_len = message_len(self.offset - self.data_set_offset);
             self.buf[self.data_set_offset + 2..self.data_set_offset + 4]
                 .copy_from_slice(&data_set_len.to_be_bytes());
         }
 
+        // Export Time is a 32-bit count of seconds in both protocols, so this
+        // is the field's own width. It wraps in 2106.
+        #[allow(clippy::cast_possible_truncation)]
         let unix_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -156,7 +174,7 @@ impl Encoder {
         match self.protocol() {
             Protocol::Ipfix => {
                 // Length in bytes
-                self.buf[2..4].copy_from_slice(&(self.offset as u16).to_be_bytes());
+                self.buf[2..4].copy_from_slice(&message_len(self.offset).to_be_bytes());
                 // Export Time
                 self.buf[4..8].copy_from_slice(&unix_secs.to_be_bytes());
                 // Sequence Number: data records exported before this message
@@ -173,11 +191,13 @@ impl Encoder {
                 // and Data FlowSet records" — records, not FlowSets, and there
                 // is no message length field at all.
                 let template_records = u32::from(self.template_included);
-                let record_total = (count + template_records) as u16;
+                let record_total = u16::try_from(count + template_records)
+                    .expect("a message holds far fewer records than u16::MAX");
 
                 self.buf[2..4].copy_from_slice(&record_total.to_be_bytes());
                 // sysUpTime, milliseconds since this exporter started. Wraps
                 // after ~49.7 days, which is inherent to the 32-bit field.
+                #[allow(clippy::cast_possible_truncation)] // the field is 32 bits
                 let uptime_ms = self.started.elapsed().as_millis() as u32;
                 self.buf[4..8].copy_from_slice(&uptime_ms.to_be_bytes());
                 self.buf[8..12].copy_from_slice(&unix_secs.to_be_bytes());
@@ -213,7 +233,7 @@ impl Encoder {
 
         // Set header: template set / FlowSet ID, then length
         put_u16(buf, offset, protocol.template_set_id());
-        put_u16(buf, offset, template.set_size() as u16);
+        put_u16(buf, offset, message_len(template.set_size()));
 
         // Template record header: template_id, field_count
         put_u16(buf, offset, template.template_id);
@@ -224,17 +244,14 @@ impl Encoder {
         // has no such mechanism, and resolving the template for it never
         // produces an enterprise field.
         for field in &template.fields {
-            match field.pen {
-                Some(pen) => {
-                    debug_assert!(protocol.supports_enterprise());
-                    put_u16(buf, offset, field.id | ENTERPRISE_BIT);
-                    put_u16(buf, offset, field.length);
-                    put_u32(buf, offset, pen);
-                }
-                None => {
-                    put_u16(buf, offset, field.id);
-                    put_u16(buf, offset, field.length);
-                }
+            if let Some(pen) = field.pen {
+                debug_assert!(protocol.supports_enterprise());
+                put_u16(buf, offset, field.id | ENTERPRISE_BIT);
+                put_u16(buf, offset, field.length);
+                put_u32(buf, offset, pen);
+            } else {
+                put_u16(buf, offset, field.id);
+                put_u16(buf, offset, field.length);
             }
         }
 
@@ -296,7 +313,11 @@ mod tests {
     }
 
     fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        use std::fmt::Write;
+        bytes.iter().fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
     }
 
     /// Captured from the exporter on the wire before the field table was
@@ -385,17 +406,14 @@ mod tests {
             offset += FIELD_SPECIFIER_LEN;
 
             assert_eq!(length, field.length);
-            match field.pen {
-                Some(pen) => {
-                    assert_eq!(raw_id & ENTERPRISE_BIT, ENTERPRISE_BIT, "enterprise bit");
-                    assert_eq!(raw_id & !ENTERPRISE_BIT, field.id);
-                    assert_eq!(be32(&msg[offset..]), pen);
-                    offset += ENTERPRISE_NUMBER_LEN;
-                }
-                None => {
-                    assert_eq!(raw_id, field.id);
-                    assert_eq!(raw_id & ENTERPRISE_BIT, 0, "no enterprise bit");
-                }
+            if let Some(pen) = field.pen {
+                assert_eq!(raw_id & ENTERPRISE_BIT, ENTERPRISE_BIT, "enterprise bit");
+                assert_eq!(raw_id & !ENTERPRISE_BIT, field.id);
+                assert_eq!(be32(&msg[offset..]), pen);
+                offset += ENTERPRISE_NUMBER_LEN;
+            } else {
+                assert_eq!(raw_id, field.id);
+                assert_eq!(raw_id & ENTERPRISE_BIT, 0, "no enterprise bit");
             }
             record_size += length as usize;
         }

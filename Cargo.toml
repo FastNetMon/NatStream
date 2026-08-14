@@ -10,3 +10,8 @@ libc = "0.2"
 log = "0.4"
 env_logger = "0.11"
 anyhow = "1"
+
+# Declared here rather than passed on the command line, so `cargo clippy` in a
+# terminal checks exactly what CI does.
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }

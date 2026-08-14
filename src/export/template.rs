@@ -7,6 +7,10 @@
 
 use anyhow::{Result, bail};
 
+// A module of nothing but protocol constants, named after the RFC field
+// they encode. Listing them individually would be a maintenance burden
+// with nothing to show for it.
+#[allow(clippy::wildcard_imports)]
 use super::elements::*;
 
 /// Which value of a conntrack event a field carries.
@@ -178,7 +182,7 @@ const _: () = assert!(shapes_are_consistent(PROFILE_FLOW_ONLY));
 pub enum Protocol {
     /// IPFIX, RFC 7011.
     Ipfix,
-    /// NetFlow v9, RFC 3954.
+    /// `NetFlow` v9, RFC 3954.
     Netflow9,
 }
 
@@ -197,7 +201,7 @@ impl Protocol {
         }
     }
 
-    /// The set / FlowSet ID that introduces a template.
+    /// The set / `FlowSet` ID that introduces a template.
     pub const fn template_set_id(self) -> u16 {
         match self {
             Protocol::Ipfix => IPFIX_TEMPLATE_SET_ID,
@@ -206,7 +210,7 @@ impl Protocol {
     }
 
     /// Whether enterprise-specific Information Elements can be expressed.
-    /// NetFlow v9 field specifiers are a flat (type, length) pair.
+    /// `NetFlow` v9 field specifiers are a flat (type, length) pair.
     pub const fn supports_enterprise(self) -> bool {
         matches!(self, Protocol::Ipfix)
     }
@@ -220,10 +224,10 @@ impl Protocol {
     }
 }
 
-/// The NetFlow v9 field type for a source.
+/// The `NetFlow` v9 field type for a source.
 ///
 /// v9 has no enterprise mechanism, so the RFC 5103 reverse counters that IPFIX
-/// carries as IE 1/2 + PEN 29305 map onto the dedicated OUT_BYTES/OUT_PKTS
+/// carries as IE 1/2 + PEN 29305 map onto the dedicated `OUT_BYTES/OUT_PKTS`
 /// types instead.
 ///
 /// Take care here: 23/24 are *correct* under v9 and *wrong* under IPFIX, where
@@ -262,7 +266,7 @@ impl Profile {
 /// How many bytes each byte/packet counter occupies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CounterWidth {
-    /// NetFlow v9's default width for IN_BYTES and friends.
+    /// `NetFlow` v9's default width for `IN_BYTES` and friends.
     Four,
     /// Wide enough for conntrack's u64 counters.
     Eight,
@@ -296,6 +300,9 @@ pub struct ResolvedField {
 
 /// A profile resolved against a counter width: the exact fields the encoder
 /// writes and the template it advertises.
+// `template_id` keeps its name because that is what RFC 7011 calls the field,
+// and an operator sets it with --template-id.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone)]
 pub struct Template {
     pub fields: Vec<ResolvedField>,
@@ -399,7 +406,7 @@ impl Template {
     }
 
     pub fn field_count(&self) -> u16 {
-        self.fields.len() as u16
+        u16::try_from(self.fields.len()).expect("a profile has a handful of fields")
     }
 
     /// Records that fit in a message that also carries the template — the
@@ -417,6 +424,8 @@ impl Template {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PEN: Option<u32> = Some(REVERSE_INFORMATION_ELEMENT_PEN);
 
     const ALL_PROTOCOLS: [Protocol; 2] = [Protocol::Ipfix, Protocol::Netflow9];
     const ALL_PROFILES: [Profile; 3] = [Profile::Full, Profile::NatSource, Profile::FlowOnly];
@@ -475,7 +484,6 @@ mod tests {
             .map(|f| (f.id, f.pen, f.length))
             .collect();
 
-        const PEN: Option<u32> = Some(REVERSE_INFORMATION_ELEMENT_PEN);
         assert_eq!(
             specifiers,
             vec![
@@ -498,7 +506,7 @@ mod tests {
     }
 
     /// Same values, but v9 has no enterprise mechanism, so the reverse counters
-    /// become the dedicated OUT_BYTES/OUT_PKTS types.
+    /// become the dedicated `OUT_BYTES/OUT_PKTS` types.
     #[test]
     #[rustfmt::skip] // the expected IDs read as one sequence, not one per line
     fn the_netflow9_full_profile_swaps_the_reverse_elements_for_out_counters() {
@@ -710,7 +718,7 @@ mod tests {
 
     // ---- Validation ----
 
-    /// Template IDs below 256 collide with the set / FlowSet identifiers, so a
+    /// Template IDs below 256 collide with the set / `FlowSet` identifiers, so a
     /// collector would read a data set as a template set.
     #[test]
     fn template_ids_below_the_reserved_range_are_rejected() {

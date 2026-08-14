@@ -78,7 +78,7 @@ fn a_counter_width_other_than_four_or_eight_is_refused() {
     }
 }
 
-/// Template IDs below 256 collide with the set / FlowSet identifiers.
+/// Template IDs below 256 collide with the set / `FlowSet` identifiers.
 #[test]
 fn a_template_id_below_the_reserved_range_is_refused() {
     for id in ["0", "1", "2", "255"] {

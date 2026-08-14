@@ -17,7 +17,7 @@ use clap::Parser;
 use log::{debug, error, info, warn};
 
 use export::{CounterWidth, Encoder, Profile, Protocol, Template};
-use netlink::constants::{DEFAULT_RECV_BUF_SIZE, DEFAULT_SEND_BUF_SIZE};
+use netlink::constants::{DEFAULT_RECV_BUF_SIZE, DEFAULT_SEND_BUF_SIZE, buffer_size, socklen};
 use netlink::{NetlinkSocket, parse_conntrack_messages};
 use signals::SignalFd;
 
@@ -34,6 +34,13 @@ const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// A worker that stayed up at least this long is treated as a fresh failure
 /// rather than part of a crash loop, and resets the backoff.
 const HEALTHY_RUNTIME: Duration = Duration::from_secs(60);
+
+/// Flush timeout: if records are buffered and no new data arrives within this
+/// period, send what we have.
+const FLUSH_TIMEOUT_MS: i32 = 100;
+
+/// How often the drop and error counters are reported.
+const STATS_INTERVAL_SECS: u64 = 10;
 
 const CONNTRACK_ACCT_SYSCTL: &str = "/proc/sys/net/netfilter/nf_conntrack_acct";
 const CONNTRACK_EVENTS_SYSCTL: &str = "/proc/sys/net/netfilter/nf_conntrack_events";
@@ -93,7 +100,7 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     log_file: Option<PathBuf>,
 
-    /// Do not touch the nf_conntrack sysctls; assume they are already set
+    /// Do not touch the `nf_conntrack` sysctls; assume they are already set
     #[arg(long)]
     no_sysctl: bool,
 }
@@ -114,6 +121,10 @@ fn main() -> Result<()> {
     run_worker(&args)
 }
 
+// The event loop is a single sequence of steps over state that every one of
+// them touches; splitting it would scatter that state across signatures without
+// making any part easier to follow.
+#[allow(clippy::too_many_lines)]
 fn run_worker(args: &Args) -> Result<()> {
     // Validate the configuration before touching anything on the system, so a
     // bad flag is reported as a bad flag rather than as whatever fails next.
@@ -170,12 +181,6 @@ fn run_worker(args: &Args) -> Result<()> {
     let mut last_template_time = Instant::now();
     let mut message_active = false;
 
-    // Flush timeout: if we have pending records and no new data arrives
-    // within this period, send what we have.
-    const FLUSH_TIMEOUT_MS: i32 = 100;
-
-    // Drop/error stats — reported every 10 seconds
-    const STATS_INTERVAL_SECS: u64 = 10;
     let mut last_stats_time = Instant::now();
     let mut prev_nl_drops: u64 = nl_socket.get_drops();
     let mut send_errors: u64 = 0;
@@ -220,18 +225,8 @@ fn run_worker(args: &Args) -> Result<()> {
                 || new_saturated > 0
             {
                 warn!(
-                    "drops: nl_recv={} udp_send={} truncated={} foreign={} clamped_counters={} \
-                     (total: nl_recv={} udp_send={} truncated={} foreign={} clamped_counters={})",
-                    new_nl_drops,
-                    new_send_errors,
-                    new_truncated,
-                    new_foreign,
-                    new_saturated,
-                    nl_drops,
-                    send_errors,
-                    truncated_msgs,
-                    foreign_msgs,
-                    saturated,
+                    "drops: nl_recv={new_nl_drops} udp_send={new_send_errors} truncated={new_truncated} foreign={new_foreign} clamped_counters={new_saturated} \
+                     (total: nl_recv={nl_drops} udp_send={send_errors} truncated={truncated_msgs} foreign={foreign_msgs} clamped_counters={saturated})",
                 );
             }
             prev_nl_drops = nl_drops;
@@ -279,7 +274,7 @@ fn run_worker(args: &Args) -> Result<()> {
 
         if signalled {
             for sig in signals.read_pending().context("failed to read signalfd")? {
-                info!("Received signal {}, shutting down", sig);
+                info!("Received signal {sig}, shutting down");
                 running = false;
             }
             if !running {
@@ -313,7 +308,7 @@ fn run_worker(args: &Args) -> Result<()> {
                 if e.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
-                error!("recv() failed: {}", e);
+                error!("recv() failed: {e}");
                 continue;
             }
         };
@@ -344,7 +339,7 @@ fn run_worker(args: &Args) -> Result<()> {
 
         // Parse all conntrack messages and encode them
         parse_conntrack_messages(&recv_buf[..datagram.len], |event| {
-            debug!("{}", event);
+            debug!("{event}");
 
             if !encoder.add_record(&event) {
                 // Message full — finalize and send, then start a new one
@@ -405,10 +400,10 @@ fn flush_message(
 
     let (data, count) = encoder.finalize();
     match udp_socket.send(data) {
-        Ok(_) => debug!("Sent message with {} records ({})", count, reason),
+        Ok(_) => debug!("Sent message with {count} records ({reason})"),
         Err(e) => {
             *send_errors += 1;
-            warn!("sendto() failed: {}", e);
+            warn!("sendto() failed: {e}");
         }
     }
 }
@@ -422,7 +417,7 @@ fn run_supervisor(args: &Args) -> Result<()> {
         ));
     }
     if pid > 0 {
-        info!("Daemon started, supervisor pid={}", pid);
+        info!("Daemon started, supervisor pid={pid}");
         return Ok(());
     }
 
@@ -457,13 +452,13 @@ fn run_supervisor(args: &Args) -> Result<()> {
             signals.close_in_child();
             let rc = match signals::unblock_all().context("Failed to reset signal mask") {
                 Err(e) => {
-                    error!("{:#}", e);
+                    error!("{e:#}");
                     1
                 }
                 Ok(()) => match run_worker(args) {
                     Ok(()) => 0,
                     Err(e) => {
-                        error!("Worker exited with error: {:#}", e);
+                        error!("Worker exited with error: {e:#}");
                         1
                     }
                 },
@@ -482,10 +477,7 @@ fn run_supervisor(args: &Args) -> Result<()> {
                 if started.elapsed() >= HEALTHY_RUNTIME {
                     backoff = RESTART_BACKOFF_MIN;
                 }
-                warn!(
-                    "Worker terminated (status=0x{:x}); restarting in {:?}",
-                    status, backoff
-                );
+                warn!("Worker terminated (status=0x{status:x}); restarting in {backoff:?}");
                 if wait_before_restart(&signals, backoff)? {
                     break;
                 }
@@ -540,7 +532,7 @@ fn supervise_child(signals: &SignalFd, child_pid: libc::pid_t) -> Result<Supervi
                 .filter(|&sig| sig != libc::SIGCHLD)
             {
                 if !shutting_down {
-                    info!("Received signal {}, stopping worker pid={}", sig, child_pid);
+                    info!("Received signal {sig}, stopping worker pid={child_pid}");
                     shutting_down = true;
                     unsafe { libc::kill(child_pid, libc::SIGTERM) };
                     kill_deadline = Some(Instant::now() + WORKER_STOP_GRACE);
@@ -548,8 +540,7 @@ fn supervise_child(signals: &SignalFd, child_pid: libc::pid_t) -> Result<Supervi
             }
         } else if kill_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             warn!(
-                "Worker pid={} did not exit within {:?}; sending SIGKILL",
-                child_pid, WORKER_STOP_GRACE
+                "Worker pid={child_pid} did not exit within {WORKER_STOP_GRACE:?}; sending SIGKILL"
             );
             unsafe { libc::kill(child_pid, libc::SIGKILL) };
             kill_deadline = None;
@@ -580,7 +571,7 @@ fn wait_before_restart(signals: &SignalFd, delay: Duration) -> Result<bool> {
                 .into_iter()
                 .find(|&sig| sig != libc::SIGCHLD)
         {
-            info!("Received signal {} while waiting to restart", sig);
+            info!("Received signal {sig} while waiting to restart");
             return Ok(true);
         }
     }
@@ -589,25 +580,23 @@ fn wait_before_restart(signals: &SignalFd, delay: Duration) -> Result<bool> {
 /// Reap the worker if it has already exited, without blocking.
 fn try_reap(child_pid: libc::pid_t) -> Result<Option<libc::c_int>> {
     let mut status: libc::c_int = 0;
-    let rc = unsafe { libc::waitpid(child_pid, &mut status as *mut libc::c_int, libc::WNOHANG) };
+    let rc = unsafe { libc::waitpid(child_pid, &raw mut status, libc::WNOHANG) };
     if rc == child_pid {
         return Ok(Some(status));
     }
     if rc < 0 {
         let err = io::Error::last_os_error();
         if err.kind() != io::ErrorKind::Interrupted {
-            return Err(anyhow::anyhow!("waitpid() failed: {}", err));
+            return Err(anyhow::anyhow!("waitpid() failed: {err}"));
         }
     }
     Ok(None)
 }
 
-/// Milliseconds from `now` until `deadline`, clamped to a poll() timeout.
+/// Milliseconds from `now` until `deadline`, clamped to a `poll()` timeout.
 fn ms_until(deadline: Instant, now: Instant) -> i32 {
-    deadline
-        .saturating_duration_since(now)
-        .as_millis()
-        .min(i32::MAX as u128) as i32
+    let millis = deadline.saturating_duration_since(now).as_millis();
+    i32::try_from(millis).unwrap_or(i32::MAX)
 }
 
 fn should_restart(status: libc::c_int) -> bool {
@@ -665,7 +654,7 @@ fn dup2_checked(fd: libc::c_int, target_fd: libc::c_int) -> Result<()> {
 fn set_send_buf(socket: &UdpSocket, size: usize) {
     use std::os::unix::io::AsRawFd;
     let fd = socket.as_raw_fd();
-    let buf_size = size as libc::c_int;
+    let buf_size = buffer_size(size);
 
     // Try SO_SNDBUFFORCE first
     let ret = unsafe {
@@ -673,8 +662,8 @@ fn set_send_buf(socket: &UdpSocket, size: usize) {
             fd,
             libc::SOL_SOCKET,
             libc::SO_SNDBUFFORCE,
-            &buf_size as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            (&raw const buf_size).cast::<libc::c_void>(),
+            socklen::<libc::c_int>(),
         )
     };
     if ret < 0 {
@@ -684,8 +673,8 @@ fn set_send_buf(socket: &UdpSocket, size: usize) {
                 fd,
                 libc::SOL_SOCKET,
                 libc::SO_SNDBUF,
-                &buf_size as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                (&raw const buf_size).cast::<libc::c_void>(),
+                socklen::<libc::c_int>(),
             )
         };
         if ret < 0 {
@@ -711,10 +700,7 @@ fn apply_conntrack_sysctl_settings(args: &Args) -> Result<()> {
     // Without accounting the flows are still exported, just with zero counters.
     // That is degraded, not fatal.
     if let Err(e) = set_proc_sysctl(CONNTRACK_ACCT_SYSCTL, "1") {
-        warn!(
-            "conntrack accounting unavailable, counters will be zero: {:#}",
-            e
-        );
+        warn!("conntrack accounting unavailable, counters will be zero: {e:#}");
     }
 
     Ok(())
@@ -723,13 +709,13 @@ fn apply_conntrack_sysctl_settings(args: &Args) -> Result<()> {
 fn set_proc_sysctl(path: &str, value: &str) -> Result<()> {
     let desired = format!("{value}\n");
     let current = fs::read_to_string(path)
-        .with_context(|| format!("failed to read sysctl {}", path))?
+        .with_context(|| format!("failed to read sysctl {path}"))?
         .trim()
         .to_string();
 
     if current != value {
         fs::write(path, desired.as_bytes())
-            .with_context(|| format!("failed to write sysctl {}={value}", path))?;
+            .with_context(|| format!("failed to write sysctl {path}={value}"))?;
     }
 
     Ok(())
@@ -738,6 +724,7 @@ fn set_proc_sysctl(path: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -787,15 +774,18 @@ mod tests {
     }
 
     /// A deadline already past must poll without waiting, not block forever —
-    /// a negative timeout means "block" to poll().
+    /// a negative timeout means "block" to `poll()`.
     #[test]
     fn a_deadline_already_past_yields_a_zero_timeout() {
         let now = Instant::now();
-        assert_eq!(ms_until(now - Duration::from_secs(1), now), 0);
+        assert_eq!(
+            ms_until(now.checked_sub(Duration::from_secs(1)).unwrap(), now),
+            0
+        );
         assert_eq!(ms_until(now, now), 0);
     }
 
-    /// poll() takes an int; a duration that would overflow it must clamp to a
+    /// `poll()` takes an int; a duration that would overflow it must clamp to a
     /// long wait rather than wrapping into a negative "block forever".
     #[test]
     fn an_enormous_deadline_clamps_instead_of_wrapping() {
@@ -860,7 +850,6 @@ mod tests {
         let path = temp_path("readonly");
         write_file(&path, "1\n");
 
-        use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
 
         let result = set_proc_sysctl(path.to_str().unwrap(), "1");
@@ -874,7 +863,7 @@ mod tests {
         fs::remove_file(&path).ok();
     }
 
-    /// The usual cause is nf_conntrack not being loaded, so the message has to
+    /// The usual cause is `nf_conntrack` not being loaded, so the message has to
     /// name the path the operator should go looking for.
     #[test]
     fn a_missing_sysctl_reports_the_path_it_could_not_read() {
@@ -889,9 +878,9 @@ mod tests {
     // ---- Command line ----
 
     fn parse(args: &[&str]) -> Args {
-        let mut argv = vec!["conntrack_exporter"];
-        argv.extend_from_slice(args);
-        Args::try_parse_from(argv).expect("arguments should parse")
+        let mut command_line = vec!["conntrack_exporter"];
+        command_line.extend_from_slice(args);
+        Args::try_parse_from(command_line).expect("arguments should parse")
     }
 
     #[test]
@@ -951,7 +940,7 @@ mod tests {
         assert!(args.collector.is_ipv6());
     }
 
-    /// The value names the README tells operators to put in EXPORTER_OPTS.
+    /// The value names the README tells operators to put in `EXPORTER_OPTS`.
     #[test]
     fn the_documented_enum_values_are_accepted() {
         assert_eq!(

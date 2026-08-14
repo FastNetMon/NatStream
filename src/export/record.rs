@@ -1,6 +1,6 @@
 //! The data record body, which is identical under every export protocol.
 //!
-//! IPFIX and NetFlow v9 differ in their message header and in how a template is
+//! IPFIX and `NetFlow` v9 differ in their message header and in how a template is
 //! described, but a record is just the field values concatenated in template
 //! order — so this is written once and shared.
 
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn counter_max_is_the_widest_value_the_field_can_hold() {
-        assert_eq!(counter_max(4), u32::MAX as u64);
+        assert_eq!(counter_max(4), u64::from(u32::MAX));
         assert_eq!(counter_max(8), u64::MAX);
     }
 
@@ -264,7 +264,7 @@ mod tests {
         let template = template(Profile::Full, CounterWidth::Four);
 
         let mut ev = event();
-        ev.orig_bytes = u32::MAX as u64 + 1;
+        ev.orig_bytes = u64::from(u32::MAX) + 1;
         let (r, saturated) = encode(&template, &ev);
 
         assert_eq!(saturated, 1);
@@ -282,7 +282,7 @@ mod tests {
         let template = template(Profile::Full, CounterWidth::Four);
 
         for value in [
-            u32::MAX as u64 + 1, // truncates to 0
+            u64::from(u32::MAX) + 1, // truncates to 0
             1u64 << 32,
             (1u64 << 32) | 5, // truncates to 5
             u64::MAX,
@@ -301,7 +301,7 @@ mod tests {
         let template = template(Profile::Full, CounterWidth::Four);
 
         let mut ev = event();
-        ev.orig_bytes = u32::MAX as u64;
+        ev.orig_bytes = u64::from(u32::MAX);
         let (r, saturated) = encode(&template, &ev);
 
         assert_eq!(saturated, 0, "the maximum value still fits");

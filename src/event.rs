@@ -11,7 +11,7 @@ pub enum NatEventType {
 
 impl NatEventType {
     /// The natEvent code (RFC 8158), which is the same under IPFIX and
-    /// NetFlow v9.
+    /// `NetFlow` v9.
     pub fn nat_event_code(self) -> u8 {
         match self {
             NatEventType::Create => NAT44_SESSION_CREATE,

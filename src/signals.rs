@@ -24,16 +24,18 @@ impl SignalFd {
     /// becomes readable when one of them is delivered.
     pub fn new(signals: &[libc::c_int]) -> io::Result<Self> {
         let mut mask: libc::sigset_t = unsafe { mem::zeroed() };
-        unsafe { libc::sigemptyset(&mut mask) };
+        unsafe { libc::sigemptyset(&raw mut mask) };
         for &sig in signals {
-            unsafe { libc::sigaddset(&mut mask, sig) };
+            unsafe { libc::sigaddset(&raw mut mask, sig) };
         }
 
-        if unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &mask, ptr::null_mut()) } != 0 {
+        if unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &raw const mask, ptr::null_mut()) } != 0
+        {
             return Err(io::Error::last_os_error());
         }
 
-        let fd = unsafe { libc::signalfd(-1, &mask, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK) };
+        let fd =
+            unsafe { libc::signalfd(-1, &raw const mask, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -53,7 +55,7 @@ impl SignalFd {
             let n = unsafe {
                 libc::read(
                     self.fd,
-                    &mut info as *mut libc::signalfd_siginfo as *mut libc::c_void,
+                    (&raw mut info).cast::<libc::c_void>(),
                     mem::size_of::<libc::signalfd_siginfo>(),
                 )
             };
@@ -69,6 +71,8 @@ impl SignalFd {
             if n == 0 {
                 break;
             }
+            // Signal numbers are small positive integers, so this cannot wrap.
+            #[allow(clippy::cast_possible_wrap)]
             signals.push(info.ssi_signo as libc::c_int);
         }
         Ok(signals)
@@ -95,8 +99,8 @@ impl Drop for SignalFd {
 /// A forked child inherits the parent's mask and needs its own disposition.
 pub fn unblock_all() -> io::Result<()> {
     let mut mask: libc::sigset_t = unsafe { mem::zeroed() };
-    unsafe { libc::sigemptyset(&mut mask) };
-    if unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &mask, ptr::null_mut()) } != 0 {
+    unsafe { libc::sigemptyset(&raw mut mask) };
+    if unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const mask, ptr::null_mut()) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -109,7 +113,7 @@ pub fn poll_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
         events: libc::POLLIN,
         revents: 0,
     };
-    let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    let ret = unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) };
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -133,12 +137,12 @@ mod tests {
 
     fn is_blocked(sig: libc::c_int) -> bool {
         let mut mask: libc::sigset_t = unsafe { mem::zeroed() };
-        unsafe { libc::sigemptyset(&mut mask) };
+        unsafe { libc::sigemptyset(&raw mut mask) };
         assert_eq!(
-            unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, ptr::null(), &mut mask) },
+            unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, ptr::null(), &raw mut mask) },
             0
         );
-        (unsafe { libc::sigismember(&mask, sig) }) == 1
+        (unsafe { libc::sigismember(&raw const mask, sig) }) == 1
     }
 
     /// Blocking is the whole point: an unblocked signal would run its default
@@ -199,7 +203,7 @@ mod tests {
         );
     }
 
-    /// A signal raised before the loop reaches its poll() must still be seen:
+    /// A signal raised before the loop reaches its `poll()` must still be seen:
     /// blocked signals stay pending, which is what closes the race between
     /// testing a shutdown flag and entering a blocking wait.
     #[test]

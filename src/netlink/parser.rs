@@ -4,6 +4,10 @@ use log::debug;
 
 use crate::event::{ConntrackEvent, NatEventType};
 
+// A module of nothing but protocol constants, named after the RFC field
+// they encode. Listing them individually would be a maintenance burden
+// with nothing to show for it.
+#[allow(clippy::wildcard_imports)]
 use super::constants::*;
 
 /// Parse all conntrack messages from a netlink recv buffer.
@@ -48,7 +52,7 @@ where
         let nfgen_family = buf[offset + NLMSG_HDRLEN];
 
         // Only handle IPv4
-        if nfgen_family != libc::AF_INET as u8 {
+        if nfgen_family != NFPROTO_IPV4 {
             offset = nla_align(offset + nlmsg_len);
             continue;
         }
@@ -111,12 +115,14 @@ fn parse_nla_tree(nat_event: NatEventType, data: &[u8]) -> Option<ConntrackEvent
                 // destination was rewritten to, and its destination is what the
                 // source was rewritten to. Either half is unchanged when that
                 // direction is not translated.
-                let mut _reply_proto: u8 = 0;
+                // The reply tuple repeats the original's protocol; parse_tuple
+                // needs somewhere to put it, and we have it already.
+                let mut repeated_proto: u8 = 0;
                 parse_tuple(
                     payload,
                     &mut post_nat_dst_ip,
                     &mut post_nat_src_ip,
-                    &mut _reply_proto,
+                    &mut repeated_proto,
                     &mut post_nat_dst_port,
                     &mut post_nat_src_port,
                 );
@@ -141,7 +147,7 @@ fn parse_nla_tree(nat_event: NatEventType, data: &[u8]) -> Option<ConntrackEvent
 
     // Filter: must have status with NAT bits set
     if !has_status || (status & IPS_NAT_MASK) == 0 {
-        debug!("Skipping non-NAT event (status=0x{:08x})", status);
+        debug!("Skipping non-NAT event (status=0x{status:08x})");
         return None;
     }
 
@@ -163,7 +169,7 @@ fn parse_nla_tree(nat_event: NatEventType, data: &[u8]) -> Option<ConntrackEvent
     })
 }
 
-/// Parse a CTA_TUPLE (ORIG or REPLY) nested attribute.
+/// Parse a `CTA_TUPLE` (ORIG or REPLY) nested attribute.
 fn parse_tuple(
     data: &[u8],
     src_ip: &mut Ipv4Addr,
@@ -197,7 +203,7 @@ fn parse_tuple(
     }
 }
 
-/// Parse CTA_TUPLE_IP nested attributes.
+/// Parse `CTA_TUPLE_IP` nested attributes.
 fn parse_tuple_ip(data: &[u8], src_ip: &mut Ipv4Addr, dst_ip: &mut Ipv4Addr) {
     let mut offset = 0;
     while offset + NLA_HDRLEN <= data.len() {
@@ -224,7 +230,7 @@ fn parse_tuple_ip(data: &[u8], src_ip: &mut Ipv4Addr, dst_ip: &mut Ipv4Addr) {
     }
 }
 
-/// Parse CTA_TUPLE_PROTO nested attributes.
+/// Parse `CTA_TUPLE_PROTO` nested attributes.
 fn parse_tuple_proto(data: &[u8], protocol: &mut u8, src_port: &mut u16, dst_port: &mut u16) {
     let mut offset = 0;
     while offset + NLA_HDRLEN <= data.len() {
@@ -248,7 +254,7 @@ fn parse_tuple_proto(data: &[u8], protocol: &mut u8, src_port: &mut u16, dst_por
     }
 }
 
-/// Parse CTA_COUNTERS nested attributes.
+/// Parse `CTA_COUNTERS` nested attributes.
 fn parse_counters(data: &[u8], bytes: &mut u64, packets: &mut u64) {
     let mut offset = 0;
     while offset + NLA_HDRLEN <= data.len() {
@@ -314,7 +320,11 @@ mod tests {
     /// Build one netlink attribute, padded to the alignment boundary.
     fn attr(nla_type: u16, payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
-        out.extend_from_slice(&((NLA_HDRLEN + payload.len()) as u16).to_ne_bytes());
+        out.extend_from_slice(
+            &u16::try_from(NLA_HDRLEN + payload.len())
+                .unwrap()
+                .to_ne_bytes(),
+        );
         out.extend_from_slice(&nla_type.to_ne_bytes());
         out.extend_from_slice(payload);
         while out.len() % NLA_ALIGNTO != 0 {
@@ -323,7 +333,7 @@ mod tests {
         out
     }
 
-    /// Build a nested attribute. The nested flag exercises NLA_TYPE_MASK.
+    /// Build a nested attribute. The nested flag exercises `NLA_TYPE_MASK`.
     fn nested(nla_type: u16, children: &[Vec<u8>]) -> Vec<u8> {
         attr(nla_type | NLA_F_NESTED, &children.concat())
     }
@@ -371,7 +381,11 @@ mod tests {
         body.extend_from_slice(&attrs.concat());
 
         let mut out = Vec::new();
-        out.extend_from_slice(&((NLMSG_HDRLEN + body.len()) as u32).to_ne_bytes());
+        out.extend_from_slice(
+            &u32::try_from(NLMSG_HDRLEN + body.len())
+                .unwrap()
+                .to_ne_bytes(),
+        );
         out.extend_from_slice(&nlmsg_type.to_ne_bytes());
         out.extend_from_slice(&0u16.to_ne_bytes()); // flags
         out.extend_from_slice(&0u32.to_ne_bytes()); // seq
@@ -385,7 +399,7 @@ mod tests {
 
     fn ct_event(msg_type: u8, family: u8, attrs: &[Vec<u8>]) -> Vec<u8> {
         message(
-            (NFNL_SUBSYS_CTNETLINK << 8) | msg_type as u16,
+            (NFNL_SUBSYS_CTNETLINK << 8) | u16::from(msg_type),
             family,
             attrs,
         )
@@ -402,7 +416,7 @@ mod tests {
     fn snat_event() -> Vec<u8> {
         ct_event(
             IPCTNL_MSG_CT_NEW,
-            libc::AF_INET as u8,
+            NFPROTO_IPV4,
             &[
                 tuple(CTA_TUPLE_ORIG, [192, 168, 1, 10], [8, 8, 8, 8], 6, 1234, 53),
                 tuple(CTA_TUPLE_REPLY, [8, 8, 8, 8], [203, 0, 113, 5], 6, 53, 40000),
@@ -445,7 +459,7 @@ mod tests {
         // 10.0.0.1:5000 -> 203.0.113.1:80, destination rewritten to 10.0.0.99:8080.
         let buf = ct_event(
             IPCTNL_MSG_CT_NEW,
-            libc::AF_INET as u8,
+            NFPROTO_IPV4,
             &[
                 tuple(CTA_TUPLE_ORIG, [10, 0, 0, 1], [203, 0, 113, 1], 6, 5000, 80),
                 tuple(CTA_TUPLE_REPLY, [10, 0, 0, 99], [10, 0, 0, 1], 6, 8080, 5000),
@@ -470,7 +484,7 @@ mod tests {
     fn delete_message_yields_a_delete_event() {
         let buf = ct_event(
             IPCTNL_MSG_CT_DELETE,
-            libc::AF_INET as u8,
+            NFPROTO_IPV4,
             &[
                 tuple(CTA_TUPLE_ORIG, [192, 168, 1, 10], [8, 8, 8, 8], 17, 1234, 53),
                 tuple(CTA_TUPLE_REPLY, [8, 8, 8, 8], [203, 0, 113, 5], 17, 53, 40000),
@@ -487,7 +501,7 @@ mod tests {
     fn events_without_nat_status_are_filtered() {
         let buf = ct_event(
             IPCTNL_MSG_CT_NEW,
-            libc::AF_INET as u8,
+            NFPROTO_IPV4,
             &[
                 tuple(CTA_TUPLE_ORIG, [10, 0, 0, 1], [10, 0, 0, 2], 6, 1000, 2000),
                 tuple(CTA_TUPLE_REPLY, [10, 0, 0, 2], [10, 0, 0, 1], 6, 2000, 1000),
@@ -502,7 +516,7 @@ mod tests {
     fn events_missing_status_are_filtered() {
         let buf = ct_event(
             IPCTNL_MSG_CT_NEW,
-            libc::AF_INET as u8,
+            NFPROTO_IPV4,
             &[tuple(
                 CTA_TUPLE_ORIG,
                 [10, 0, 0, 1],
@@ -523,7 +537,7 @@ mod tests {
         // a subsystem check this parses as a NAT session teardown.
         let buf = message(
             0x2,
-            libc::AF_INET as u8,
+            NFPROTO_IPV4,
             &[
                 tuple(CTA_TUPLE_ORIG, [10, 0, 0, 1], [10, 0, 0, 2], 6, 1000, 2000),
                 tuple(CTA_TUPLE_REPLY, [10, 0, 0, 2], [203, 0, 113, 9], 6, 2000, 1000),
@@ -542,7 +556,7 @@ mod tests {
         let exp_msg_new: u16 = 0;
         let buf = message(
             (subsys_ctnetlink_exp << 8) | exp_msg_new,
-            libc::AF_INET as u8,
+            NFPROTO_IPV4,
             &[
                 tuple(CTA_TUPLE_ORIG, [10, 0, 0, 1], [10, 0, 0, 2], 6, 1000, 2000),
                 attr(CTA_STATUS, &IPS_SRC_NAT.to_be_bytes()),
@@ -556,7 +570,7 @@ mod tests {
     fn non_ipv4_events_are_skipped() {
         let buf = ct_event(
             IPCTNL_MSG_CT_NEW,
-            libc::AF_INET6 as u8,
+            NFPROTO_IPV6,
             &[attr(CTA_STATUS, &IPS_SRC_NAT.to_be_bytes())],
         );
 
@@ -603,7 +617,7 @@ mod tests {
     fn attributes_with_short_payloads_are_ignored() {
         let buf = ct_event(
             IPCTNL_MSG_CT_NEW,
-            libc::AF_INET as u8,
+            NFPROTO_IPV4,
             &[
                 nested(
                     CTA_TUPLE_ORIG,
