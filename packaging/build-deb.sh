@@ -39,8 +39,39 @@ strip --strip-unneeded "${stage}/usr/sbin/${BIN}"
 install -D -m 0644 "packaging/systemd/${PKG}.service"       "${stage}/lib/systemd/system/${PKG}.service"
 install -D -m 0644 "packaging/default/${PKG}"               "${stage}/etc/default/${PKG}"
 install -D -m 0644 README.md                                "${stage}/usr/share/doc/${PKG}/README.md"
-# Debian expects a package's licence at this path.
-install -D -m 0644 LICENSE                                  "${stage}/usr/share/doc/${PKG}/copyright"
+
+# The licence in full, and the copyright notice naming its holder.
+install -D -m 0644 LICENSE                                  "${stage}/usr/share/doc/${PKG}/LICENSE"
+install -D -m 0644 NOTICE                                   "${stage}/usr/share/doc/${PKG}/NOTICE"
+
+# Debian expects a machine-readable copyright file at this exact path. It may
+# point at the common-licenses copy rather than repeating the text, which
+# base-files ships on every Debian and Ubuntu system.
+cat > "${stage}/usr/share/doc/${PKG}/copyright" <<'COPYRIGHT'
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: NatStream
+Source: https://github.com/FastNetMon/NatStream
+
+Files: *
+Copyright: 2026 FastNetMon LTD
+License: Apache-2.0
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+ .
+     http://www.apache.org/licenses/LICENSE-2.0
+ .
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ .
+ On Debian systems the complete text of the Apache License 2.0 can be found
+ in /usr/share/common-licenses/Apache-2.0, and a copy is installed alongside
+ this file as LICENSE.
+COPYRIGHT
+chmod 0644 "${stage}/usr/share/doc/${PKG}/copyright"
 
 install -d -m 0755 "${stage}/DEBIAN"
 for script in postinst prerm postrm; do

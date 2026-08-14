@@ -293,5 +293,8 @@ events and hold the flow's totals on DELETE.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE), or
+Copyright 2026 FastNetMon LTD.
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the
+full text and [NOTICE](NOTICE) for the copyright notice, or
 <https://www.apache.org/licenses/LICENSE-2.0>.
