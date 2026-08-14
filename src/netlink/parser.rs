@@ -4,11 +4,15 @@ use log::debug;
 
 use crate::event::{ConntrackEvent, NatEventType};
 
-// A module of nothing but protocol constants, named after the RFC field
-// they encode. Listing them individually would be a maintenance burden
-// with nothing to show for it.
-#[allow(clippy::wildcard_imports)]
-use super::constants::*;
+#[cfg(test)]
+use super::constants::NFPROTO_IPV6;
+use super::constants::{
+    CTA_COUNTERS_BYTES, CTA_COUNTERS_ORIG, CTA_COUNTERS_PACKETS, CTA_COUNTERS_REPLY, CTA_IP_V4_DST,
+    CTA_IP_V4_SRC, CTA_PROTO_DST_PORT, CTA_PROTO_NUM, CTA_PROTO_SRC_PORT, CTA_STATUS, CTA_TUPLE_IP,
+    CTA_TUPLE_ORIG, CTA_TUPLE_PROTO, CTA_TUPLE_REPLY, IPCTNL_MSG_CT_DELETE, IPCTNL_MSG_CT_NEW,
+    IPS_NAT_MASK, NFGENMSG_LEN, NFNL_SUBSYS_CTNETLINK, NFPROTO_IPV4, NLA_ALIGNTO, NLA_HDRLEN,
+    NLA_TYPE_MASK, NLMSG_HDRLEN, NLMSG_MIN_TYPE,
+};
 
 /// Parse all conntrack messages from a netlink recv buffer.
 /// Calls the callback for each valid NAT event found.
@@ -314,6 +318,7 @@ fn nla_align(len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::netlink::constants::{IPS_DST_NAT, IPS_SRC_NAT};
 
     mod fixture {
         use super::{

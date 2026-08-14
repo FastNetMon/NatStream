@@ -4,11 +4,10 @@ use std::os::unix::io::RawFd;
 use anyhow::{Context, Result};
 use log::{debug, warn};
 
-// A module of nothing but protocol constants, named after the RFC field
-// they encode. Listing them individually would be a maintenance burden
-// with nothing to show for it.
-#[allow(clippy::wildcard_imports)]
-use super::constants::*;
+use super::constants::{
+    AF_NETLINK_FAMILY, NETLINK_ADD_MEMBERSHIP, NETLINK_NETFILTER, NETLINK_NO_ENOBUFS,
+    NFNLGRP_CONNTRACK_DESTROY, NFNLGRP_CONNTRACK_NEW, buffer_size, socklen,
+};
 
 pub struct NetlinkSocket {
     fd: RawFd,

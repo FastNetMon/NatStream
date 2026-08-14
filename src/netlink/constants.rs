@@ -10,9 +10,8 @@ pub const AF_NETLINK_FAMILY: u16 = libc::AF_NETLINK as u16;
 // the AF_* ones, and the header carries them in a single byte.
 #[allow(clippy::cast_possible_truncation)] // AF_INET is 2
 pub const NFPROTO_IPV4: u8 = libc::AF_INET as u8;
-// The exporter handles IPv4 only, so nothing reads this outside the test that
-// checks an IPv6 event is skipped — but the pair belongs together.
-#[allow(clippy::cast_possible_truncation, dead_code)] // AF_INET6 is 10
+#[cfg(test)]
+#[allow(clippy::cast_possible_truncation)] // AF_INET6 is 10
 pub const NFPROTO_IPV6: u8 = libc::AF_INET6 as u8;
 
 // Netlink socket options

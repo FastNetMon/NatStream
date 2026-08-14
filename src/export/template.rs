@@ -7,11 +7,16 @@
 
 use anyhow::{Result, bail};
 
-// A module of nothing but protocol constants, named after the RFC field
-// they encode. Listing them individually would be a maintenance burden
-// with nothing to show for it.
-#[allow(clippy::wildcard_imports)]
-use super::elements::*;
+use super::elements::{
+    ENTERPRISE_NUMBER_LEN, FIELD_SPECIFIER_LEN, IE_DESTINATION_IPV4_ADDRESS,
+    IE_DESTINATION_TRANSPORT_PORT, IE_NAT_EVENT, IE_OCTET_DELTA_COUNT, IE_PACKET_DELTA_COUNT,
+    IE_POST_NAPT_DESTINATION_TRANSPORT_PORT, IE_POST_NAPT_SOURCE_TRANSPORT_PORT,
+    IE_POST_NAT_DESTINATION_IPV4_ADDRESS, IE_POST_NAT_SOURCE_IPV4_ADDRESS, IE_PROTOCOL_IDENTIFIER,
+    IE_SOURCE_IPV4_ADDRESS, IE_SOURCE_TRANSPORT_PORT, IPFIX_HEADER_LEN, IPFIX_TEMPLATE_SET_ID,
+    IPFIX_VERSION, MAX_MSG_SIZE, MIN_TEMPLATE_ID, NETFLOW9_ALIGNMENT, NETFLOW9_HEADER_LEN,
+    NETFLOW9_TEMPLATE_FLOWSET_ID, NETFLOW9_VERSION, REVERSE_INFORMATION_ELEMENT_PEN,
+    SET_HEADER_LEN, V9_OUT_BYTES, V9_OUT_PKTS,
+};
 
 /// Which value of a conntrack event a field carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -441,6 +446,7 @@ impl Template {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::export::elements::DEFAULT_TEMPLATE_ID;
 
     const PEN: Option<u32> = Some(REVERSE_INFORMATION_ELEMENT_PEN);
 

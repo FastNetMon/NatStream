@@ -2,11 +2,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::event::ConntrackEvent;
 
-// A module of nothing but protocol constants, named after the RFC field
-// they encode. Listing them individually would be a maintenance burden
-// with nothing to show for it.
-#[allow(clippy::wildcard_imports)]
-use super::elements::*;
+use super::elements::{ENTERPRISE_BIT, MAX_MSG_SIZE, SET_HEADER_LEN};
 use super::record::write_record;
 use super::template::{Protocol, Template, align_up};
 
@@ -268,6 +264,12 @@ impl Encoder {
 mod tests {
     use super::*;
     use crate::event::NatEventType;
+    use crate::export::elements::{
+        DEFAULT_TEMPLATE_ID, ENTERPRISE_NUMBER_LEN, FIELD_SPECIFIER_LEN, IPFIX_HEADER_LEN,
+        IPFIX_TEMPLATE_SET_ID, IPFIX_VERSION, NAT44_SESSION_CREATE, NAT44_SESSION_DELETE,
+        NETFLOW9_ALIGNMENT, NETFLOW9_HEADER_LEN, NETFLOW9_TEMPLATE_FLOWSET_ID, NETFLOW9_VERSION,
+        V9_OUT_BYTES, V9_OUT_PKTS,
+    };
     use crate::export::template::{CounterWidth, Profile, Protocol};
     use crate::export::test_fixture::{be16, be32, be64, event as fixture_event};
 
