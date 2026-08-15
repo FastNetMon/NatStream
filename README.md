@@ -4,6 +4,12 @@ NatStream is a Linux daemon that exports conntrack NAT events as IPFIX (RFC 7011
 
 It listens to netlink conntrack notifications, extracts NAT-relevant flow fields, and sends them as flow records to a configured collector.
 
+![NatStream on a live NAT box: 28.7 Gbps in, 28.8 Gbps out, exporter at 0.1% CPU and 2 MB RSS](assets/natstream_load.png)
+
+A live NAT box carrying ~28.7 Gbps in and ~28.8 Gbps out on `bond0`, exporting
+every conntrack event to a collector: `natstream` sits at 0.1% CPU and 2 MB
+resident on an 88-thread E5-2699, and the whole machine is at 3%.
+
 Upstream: <https://github.com/FastNetMon/NatStream>
 
 ## Install (Debian / Ubuntu)
